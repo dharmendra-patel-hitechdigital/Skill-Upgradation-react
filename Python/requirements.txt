@@ -1,0 +1,34 @@
+# Runtime dependencies.
+# Lower bounds are pinned; upper bounds are left open deliberately so security
+# patches arrive without a code change. For reproducible deploys, generate a
+# fully-pinned lock file from this:  pip freeze > requirements.lock.txt
+
+# --- web framework ---
+fastapi>=0.118.0
+uvicorn[standard]>=0.34.0
+python-multipart>=0.0.20          # multipart/form-data: file uploads + login form
+
+# --- configuration & validation ---
+pydantic>=2.11.0
+pydantic-settings>=2.7.0
+email-validator>=2.2.0            # backs Pydantic's EmailStr
+
+# --- database ---
+sqlalchemy[asyncio]>=2.0.36
+alembic>=1.14.0
+aiosqlite>=0.20.0                 # async driver: default local development DB
+aiomysql>=0.2.0                   # async driver: MySQL / MariaDB
+PyMySQL>=1.1.1                    # blocking MySQL driver, used by Alembic
+greenlet>=3.1.0                   # required by SQLAlchemy's asyncio bridge
+
+# --- security ---
+python-jose[cryptography]>=3.3.0  # JWT sign/verify
+bcrypt>=4.2.0                     # password hashing
+
+# --- AI providers ---
+openai>=1.60.0                    # document analysis + grounded Q&A
+boto3>=1.35.0                     # AWS Textract OCR + S3 storage
+pypdf>=5.1.0                      # PDF text-layer extraction (no-credential path)
+
+# --- http ---
+httpx>=0.27.0                     # used by the OpenAI SDK and by the test client

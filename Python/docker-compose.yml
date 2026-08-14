@@ -1,0 +1,65 @@
+# Local stack: API + MySQL. Bring it up with:
+#   docker compose up --build
+#
+# Then open http://localhost:8000/docs
+#
+# The API waits for MySQL to report healthy before starting, so the first boot
+# does not race the database's own initialisation.
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: appdb
+      MYSQL_USER: appuser
+      MYSQL_PASSWORD: apppassword
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # Anything in this directory runs once, on first initialisation only.
+      - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: mysql+pymysql://appuser:apppassword@db:3306/appdb
+      # Development-only value. Generate a real one for any deployed environment:
+      #   python -c "import secrets; print(secrets.token_urlsafe(48))"
+      SECRET_KEY: local-compose-development-secret-not-for-production
+      CORS_ORIGINS: http://localhost:5173,http://localhost:3000
+      LOG_JSON: "true"
+      STORAGE_BACKEND: local
+      STORAGE_LOCAL_DIR: /app/var/documents
+      # Leave blank to run on the built-in offline AI providers. Set a key here
+      # (or in a .env file) to enable OpenAI-powered analysis.
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      TEXTRACT_ENABLED: "${TEXTRACT_ENABLED:-false}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+    volumes:
+      - document-data:/app/var
+    # The image's CMD starts the server; this runs migrations first so the
+    # schema is current before any request is served.
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000
+             --proxy-headers --forwarded-allow-ips '*'"
+
+volumes:
+  mysql-data:
+  document-data:
