@@ -16,7 +16,8 @@ from __future__ import annotations
 
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
+from sqlalchemy.engine import make_url
 
 # Importing the models package registers every table on Base.metadata, which is
 # what `--autogenerate` diffs against.
@@ -27,6 +28,14 @@ from app.core.database import Base
 from app.models.base import UtcDateTime
 
 config = context.config
+
+
+def _connect_args() -> dict[str, object]:
+    """Driver-specific connect timeout, mirroring app.core.database."""
+    backend = make_url(settings.sync_database_url).get_backend_name()
+    if backend in ("mysql", "mariadb", "postgresql"):
+        return {"connect_timeout": settings.DB_CONNECT_TIMEOUT_SECONDS}
+    return {}
 
 
 def render_item(type_: str, obj: object, autogen_context: object) -> str | bool:
@@ -46,8 +55,12 @@ def render_item(type_: str, obj: object, autogen_context: object) -> str | bool:
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", settings.sync_database_url)
-
+# The URL is deliberately NOT written back into the Alembic config via
+# `config.set_main_option()`. That config is a ConfigParser, which treats "%" as
+# interpolation syntax - so any percent-encoded character in the password (and
+# "%23" for "#" is mandatory, see .env.example) makes Alembic die with
+# "invalid interpolation syntax" before it ever reaches the database.
+# Building the engine straight from settings avoids that class of bug entirely.
 target_metadata = Base.metadata
 
 
@@ -71,10 +84,12 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """Apply migrations against a live database."""
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    connectable = create_engine(
+        settings.sync_database_url,
         poolclass=pool.NullPool,
+        # Migrations are often run against a managed database over the internet
+        # (e.g. RDS); the driver's default connect timeout can be too short.
+        connect_args=_connect_args(),
     )
 
     with connectable.connect() as connection:

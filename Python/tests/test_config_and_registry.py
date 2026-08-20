@@ -54,6 +54,112 @@ def test_special_characters_in_a_password_survive_rewriting() -> None:
     assert "p%40ss%2Fword" in rewritten
 
 
+def test_a_percent_encoded_password_decodes_to_the_real_one() -> None:
+    """A password like "Secr#t$99" must be written "Secr%23t%2499" in the URL.
+
+    "#" is the dangerous one: it starts a URL fragment (and a .env comment), so an
+    unencoded password is silently truncated instead of rejected.
+    """
+    from sqlalchemy.engine import make_url
+
+    settings = make_settings(
+        DATABASE_URL=(
+            "mysql+pymysql://admin:Secr%23t%2499"
+            "@db-1.abc.eu-north-1.rds.amazonaws.com:3306/appdb"
+        )
+    )
+    for url in (settings.async_database_url, settings.sync_database_url):
+        parsed = make_url(url)
+        assert parsed.password == "Secr#t$99"
+        assert parsed.host == "db-1.abc.eu-north-1.rds.amazonaws.com"
+        assert parsed.database == "appdb"
+
+
+# --------------------------------------------------- discrete DB_* parts (ECS)
+def test_db_parts_are_assembled_into_a_database_url() -> None:
+    """An ECS task definition injects the password alone, not a whole URL."""
+    settings = make_settings(
+        DATABASE_URL="sqlite:///./ignored.db",
+        DB_HOST="db-1.abc.eu-north-1.rds.amazonaws.com",
+        DB_NAME="appdb",
+        DB_USER="admin",
+        DB_PASSWORD="plainpassword",
+    )
+    assert settings.DATABASE_URL == (
+        "mysql://admin:plainpassword@db-1.abc.eu-north-1.rds.amazonaws.com:3306/appdb"
+    )
+    assert settings.async_database_url.startswith("mysql+aiomysql://")
+    assert settings.sync_database_url.startswith("mysql+pymysql://")
+
+
+def test_assembling_encodes_a_generated_password() -> None:
+    """Secrets Manager generates passwords containing URL-reserved characters.
+
+    Encoding them here is the point of assembling in code: nobody has to
+    remember to percent-encode a value they never typed.
+    """
+    from sqlalchemy.engine import make_url
+
+    settings = make_settings(
+        DB_HOST="db-1.abc.eu-north-1.rds.amazonaws.com",
+        DB_NAME="appdb",
+        DB_USER="admin",
+        DB_PASSWORD="Secr#t$99/x",
+    )
+    assert make_url(settings.async_database_url).password == "Secr#t$99/x"
+
+
+def test_db_parts_are_ignored_without_a_host() -> None:
+    """DATABASE_URL stays authoritative locally, where no DB_HOST is set."""
+    settings = make_settings(DATABASE_URL="sqlite:///./app.db", DB_USER="admin")
+    assert settings.DATABASE_URL == "sqlite:///./app.db"
+    assert settings.is_sqlite
+
+
+def test_assembled_url_is_visible_to_the_production_guards() -> None:
+    """The assembly validator must run before the production safety rails."""
+    settings = make_settings(
+        ENVIRONMENT="production",
+        SECRET_KEY="a-long-enough-production-secret-key-value",
+        CORS_ORIGINS="https://app.example.com",
+        DB_HOST="db-1.abc.eu-north-1.rds.amazonaws.com",
+        DB_NAME="appdb",
+        DB_USER="admin",
+        DB_PASSWORD="generated",
+    )
+    assert not settings.is_sqlite
+    assert not settings.should_auto_create_tables
+
+
+def test_mysql_gets_an_explicit_connect_timeout() -> None:
+    """Without this, a cross-region RDS handshake fails as a bare 2003 error."""
+    from app.core import database as db_module
+
+    settings = make_settings(
+        DATABASE_URL="mysql+pymysql://u:p@rds.example.com:3306/appdb",
+        DB_CONNECT_TIMEOUT_SECONDS=42,
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(db_module, "settings", settings)
+        kwargs = db_module._engine_kwargs()
+
+    assert kwargs["connect_args"] == {"connect_timeout": 42}
+    assert kwargs["pool_pre_ping"] is True
+
+
+def test_sqlite_does_not_get_a_connect_timeout() -> None:
+    """The keyword is driver-specific; passing it to SQLite would raise."""
+    from app.core import database as db_module
+
+    settings = make_settings(DATABASE_URL="sqlite:///./x.db")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(db_module, "settings", settings)
+        kwargs = db_module._engine_kwargs()
+
+    assert kwargs["connect_args"] == {"check_same_thread": False}
+    assert "connect_timeout" not in kwargs["connect_args"]
+
+
 def test_an_unknown_dialect_is_passed_through_untouched() -> None:
     url = "oracle+cx_oracle://user:pw@host:1521/db"
     assert _rewrite_driver(url, async_mode=True) == url

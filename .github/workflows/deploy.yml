@@ -1,0 +1,205 @@
+# Deploys main to ECS Fargate: build -> push to ECR -> migrate -> roll out.
+#
+# Mirrors the CodePipeline stages in infra/cloudformation/40-pipeline.yaml. Both
+# exist deliberately: this gives fast feedback on the push-to-main path, while
+# CodePipeline keeps a deploy path that works even if GitHub is unreachable.
+# They build from the same Dockerfiles and push to the same ECR repos, so
+# whichever ran last is what is live.
+#
+# One-time setup:
+#   1. Deploy infra/cloudformation/50-github-oidc.yaml
+#   2. Repository -> Settings -> Variables -> Actions, add:
+#        AWS_DEPLOY_ROLE_ARN  (the stack's DeployRoleArn output)
+#        AWS_REGION           e.g. us-east-1
+#      Variables, not secrets: neither value is sensitive, and a role ARN that
+#      shows up in the logs is far easier to debug than a masked one.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never let two deploys race. cancel-in-progress is deliberately FALSE here,
+# unlike in ci.yml: cancelling a half-finished migration or ECS rollout leaves
+# the environment in a state nobody chose.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write     # required to request the OIDC token for AWS
+
+env:
+  PROJECT_NAME: skill-upgradation
+
+jobs:
+  deploy:
+    name: Build, migrate, deploy
+    runs-on: ubuntu-latest
+    # Attach a GitHub Environment to require manual approval before this runs
+    # (Settings -> Environments -> production -> required reviewers).
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # No AWS keys anywhere: GitHub mints a short-lived OIDC token, STS trades
+      # it for credentials good for an hour, scoped to this repo and ref by the
+      # trust policy in 50-github-oidc.yaml.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: gha-${{ github.run_id }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Resolve image tags
+        id: tags
+        run: |
+          # Short sha, matching what the buildspecs produce, so an image built
+          # by either pipeline is tagged identically.
+          TAG=$(echo "${{ github.sha }}" | cut -c 1-12)
+          REGISTRY="${{ steps.ecr.outputs.registry }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "api=$REGISTRY/$PROJECT_NAME-api:$TAG" >> "$GITHUB_OUTPUT"
+          echo "web=$REGISTRY/$PROJECT_NAME-web:$TAG" >> "$GITHUB_OUTPUT"
+          echo "api_latest=$REGISTRY/$PROJECT_NAME-api:latest" >> "$GITHUB_OUTPUT"
+          echo "web_latest=$REGISTRY/$PROJECT_NAME-web:latest" >> "$GITHUB_OUTPUT"
+
+      # Tests run against the image before it is pushed. A red suite must not
+      # produce an artifact someone could deploy by hand later.
+      - name: Lint and test
+        run: ./scripts/ci.sh test
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./Python
+          target: runtime
+          push: true
+          tags: |
+            ${{ steps.tags.outputs.api }}
+            ${{ steps.tags.outputs.api_latest }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+          build-args: |
+            GIT_COMMIT=${{ steps.tags.outputs.tag }}
+
+      - name: Build and push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./React
+          push: true
+          tags: |
+            ${{ steps.tags.outputs.web }}
+            ${{ steps.tags.outputs.web_latest }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
+          build-args: |
+            VITE_API_BASE_URL=/api/v1
+            GIT_COMMIT=${{ steps.tags.outputs.tag }}
+
+      # Runs inside the VPC as a one-off ECS task, because a GitHub-hosted
+      # runner cannot reach a private RDS instance. Before the rollout, so the
+      # schema is ready for the new tasks.
+      - name: Apply migrations
+        run: ./scripts/aws-migrate.sh "${{ steps.tags.outputs.api }}"
+
+      - name: Fetch API task definition
+        id: fetch-api
+        run: |
+          # describe-task-definition returns read-only fields that
+          # register-task-definition rejects. Stripping them is the standard
+          # workaround, not an optimisation.
+          aws ecs describe-task-definition \
+            --task-definition "$PROJECT_NAME-api" \
+            --query taskDefinition \
+            | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)' \
+            > task-def-api.json
+          echo "file=task-def-api.json" >> "$GITHUB_OUTPUT"
+
+      - name: Set new API image
+        id: taskdef-api
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ steps.fetch-api.outputs.file }}
+          container-name: api
+          image: ${{ steps.tags.outputs.api }}
+
+      - name: Deploy API service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.taskdef-api.outputs.task-definition }}
+          service: ${{ env.PROJECT_NAME }}-api
+          cluster: ${{ env.PROJECT_NAME }}-cluster
+          # Fail the job if tasks never stabilise. The service's deployment
+          # circuit breaker does the rollback; this makes sure the job says so.
+          wait-for-service-stability: true
+          wait-for-minutes: 15
+
+      - name: Fetch web task definition
+        id: fetch-web
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition "$PROJECT_NAME-web" \
+            --query taskDefinition \
+            | jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)' \
+            > task-def-web.json
+          echo "file=task-def-web.json" >> "$GITHUB_OUTPUT"
+
+      - name: Set new web image
+        id: taskdef-web
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ steps.fetch-web.outputs.file }}
+          container-name: web
+          image: ${{ steps.tags.outputs.web }}
+
+      - name: Deploy web service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.taskdef-web.outputs.task-definition }}
+          service: ${{ env.PROJECT_NAME }}-web
+          cluster: ${{ env.PROJECT_NAME }}-cluster
+          wait-for-service-stability: true
+          wait-for-minutes: 10
+
+      - name: Smoke test
+        run: |
+          URL=$(aws cloudformation list-exports \
+            --query "Exports[?Name=='$PROJECT_NAME-LoadBalancerDns'].Value" \
+            --output text)
+          echo "Checking $URL"
+          # Readiness, not liveness: this asserts the deployed tasks can really
+          # reach the database, which is the failure a deploy most often
+          # introduces.
+          for i in $(seq 1 10); do
+            if curl -fsS --max-time 10 "$URL/api/v1/health/ready" | grep -q '"status":"ok"'; then
+              echo "Smoke test passed"
+              exit 0
+            fi
+            echo "  attempt $i failed, retrying in 10s"
+            sleep 10
+          done
+          echo "Smoke test failed - the deploy is live but unhealthy." >&2
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy ${{ steps.tags.outputs.tag }}"
+            echo ""
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Commit | ${{ github.sha }} |"
+            echo "| API image | ${{ steps.tags.outputs.api }} |"
+            echo "| Web image | ${{ steps.tags.outputs.web }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

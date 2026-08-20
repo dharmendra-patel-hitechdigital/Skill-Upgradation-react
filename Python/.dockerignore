@@ -10,7 +10,9 @@ __pycache__/
 *.db
 *.sqlite3
 var/
-tests/
+# tests/ is deliberately NOT excluded: the Dockerfile's `test` stage
+# copies it, so the suite runs inside the same image the API ships as.
+# The runtime stage never COPYs it, so the shipped image stays clean.
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

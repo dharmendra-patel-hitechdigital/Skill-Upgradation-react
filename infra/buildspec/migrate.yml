@@ -1,0 +1,59 @@
+# CodeBuild spec that applies Alembic migrations to RDS.
+#
+# Runs as its own pipeline stage, AFTER the images are built and BEFORE ECS is
+# updated. That ordering is deliberate: a rolling ECS deploy runs old and new
+# tasks side by side for a few minutes, so the schema has to satisfy both. Keep
+# migrations additive (add a nullable column, backfill, drop it in a later
+# release) and this stage is safe; a destructive migration here will break the
+# tasks that are still serving traffic.
+#
+# This project runs inside the VPC (see 40-pipeline.yaml VpcConfig) because RDS
+# is not publicly accessible. That also means it needs a private subnet with a
+# NAT route, or it cannot reach Secrets Manager or PyPI.
+#
+# Required environment, all set by infra/cloudformation/40-pipeline.yaml:
+#   DB_HOST, DB_PORT, DB_NAME, DB_USER
+#   DB_PASSWORD - injected by the CodeBuild project as a SECRETS_MANAGER-typed
+#                 environment variable, so it never appears here or in the log.
+#
+# The password is deliberately NOT declared in an `env/secrets-manager` block:
+# that block takes a literal secret id, and the buildspec is parsed before any
+# shell runs, so a "${DB_SECRET_ARN}:password" reference would not expand.
+
+version: 0.2
+
+env:
+  variables:
+    ENVIRONMENT: production
+    DB_DIALECT: mysql
+  exported-variables:
+    - MIGRATION_REVISION
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - python -m pip install --upgrade pip
+      - pip install -r Python/requirements.txt
+
+  pre_build:
+    commands:
+      - cd Python
+      # SECRET_KEY is unused by Alembic but ENVIRONMENT=production makes the
+      # settings model refuse to load without a non-placeholder value.
+      - export SECRET_KEY="migration-stage-placeholder-not-used-to-sign-anything"
+      - echo "--- current revision ---"
+      # Prints "(head)" markers so the log shows how far behind the database is
+      # before anything is applied.
+      - alembic current --verbose
+
+  build:
+    commands:
+      - echo "--- upgrade head ---"
+      - alembic upgrade head
+
+  post_build:
+    commands:
+      - MIGRATION_REVISION=$(alembic current 2>/dev/null | tail -n 1)
+      - echo "Database now at ${MIGRATION_REVISION}"

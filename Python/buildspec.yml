@@ -1,0 +1,54 @@
+# CodeBuild spec for the FastAPI service.
+#
+# Build logic lives in scripts/ci.sh, not here. This file owns only what is
+# genuinely CodeBuild-specific: ECR authentication, the commit tag, and the
+# imagedefinitions.json contract the ECS deploy action consumes. Everything else
+# is shared with .github/workflows/ and the free-tier pipeline, so there is one
+# definition of "how this project builds" rather than several that drift.
+#
+# This is also the project that gates on tests. The web project builds only -
+# the two run in parallel, and running the Python suite twice would just make
+# the stage slower without catching anything extra.
+#
+# Required environment (set by infra/cloudformation/40-pipeline.yaml):
+#   AWS_DEFAULT_REGION, ECR_REPOSITORY_URI, CONTAINER_NAME
+#
+# Requires privilegedMode: true on the CodeBuild project (docker build).
+
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo "--- ecr login ---"
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REPOSITORY_URI"
+      # CODEBUILD_RESOLVED_SOURCE_VERSION is the real commit sha. CodePipeline's
+      # source artifact is a zip with no .git directory, so `git rev-parse` here
+      # would fail; the build number is the fallback for a manual run.
+      - IMAGE_TAG=$(echo "${CODEBUILD_RESOLVED_SOURCE_VERSION:-$CODEBUILD_BUILD_NUMBER}" | cut -c 1-12)
+      # ci.sh appends "<project>-api" itself, so it needs the registry host and
+      # the project prefix separately rather than the full repository URI.
+      - export REGISTRY="${ECR_REPOSITORY_URI%/*}"
+      - PROJECT_NAME="${ECR_REPOSITORY_URI##*/}"
+      - export PROJECT_NAME="${PROJECT_NAME%-api}"
+      - echo "Registry $REGISTRY, project $PROJECT_NAME, tag $IMAGE_TAG"
+
+  build:
+    commands:
+      # Lint and tests run inside the image's own `test` stage, so they exercise
+      # the exact interpreter and wheels that ship. A red suite stops the build
+      # before anything is pushed.
+      - ./scripts/ci.sh test
+      - ./scripts/ci.sh build "$IMAGE_TAG" api
+
+  post_build:
+    commands:
+      - ./scripts/ci.sh push "$IMAGE_TAG" api
+      # The ECS deploy action reads this and swaps the image on the named
+      # container. The name must match the task definition in 30-services.yaml.
+      - printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$ECR_REPOSITORY_URI:$IMAGE_TAG" > imagedefinitions.json
+      - cat imagedefinitions.json
+
+artifacts:
+  files:
+    - imagedefinitions.json

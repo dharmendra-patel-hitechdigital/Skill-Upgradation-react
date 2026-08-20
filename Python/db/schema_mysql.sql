@@ -20,7 +20,7 @@ USE appdb;
 
 -- ---------------------------------------------------------------- users
 CREATE TABLE IF NOT EXISTS users (
-    id              BIGINT       NOT NULL AUTO_INCREMENT,
+    id              INT          NOT NULL AUTO_INCREMENT,
     email           VARCHAR(255) NOT NULL,
     full_name       VARCHAR(255) NULL,
     hashed_password VARCHAR(255) NOT NULL,
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
                                  ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
-    UNIQUE KEY uq_users_email (email),
+    UNIQUE KEY ix_users_email (email),
     KEY ix_users_role (role)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
@@ -40,9 +40,9 @@ CREATE TABLE IF NOT EXISTS users (
 -- One row per issued refresh token. Only the `jti` is stored, never the token
 -- string, so a database leak does not hand over usable sessions.
 CREATE TABLE IF NOT EXISTS refresh_tokens (
-    id             BIGINT       NOT NULL AUTO_INCREMENT,
+    id             INT          NOT NULL AUTO_INCREMENT,
     jti            VARCHAR(64)  NOT NULL,
-    user_id        BIGINT       NOT NULL,
+    user_id        INT          NOT NULL,
     expires_at     DATETIME     NOT NULL,
     revoked_at     DATETIME     NULL,
     -- 'rotated' | 'logout' | 'password_change' | 'security' | 'admin'.
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
                                 ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
-    UNIQUE KEY uq_refresh_tokens_jti (jti),
+    UNIQUE KEY ix_refresh_tokens_jti (jti),
     KEY ix_refresh_tokens_user_id (user_id),
     -- Serves "revoke every live session for this user" without a table scan.
     KEY ix_refresh_tokens_user_revoked (user_id, revoked_at),
@@ -67,8 +67,8 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 -- Small, hot, heavily queried: metadata and lifecycle only. The bulky OCR text
 -- lives in document_extractions so listing 50 documents stays cheap.
 CREATE TABLE IF NOT EXISTS documents (
-    id                     BIGINT       NOT NULL AUTO_INCREMENT,
-    owner_id               BIGINT       NOT NULL,
+    id                     INT          NOT NULL AUTO_INCREMENT,
+    owner_id               INT          NOT NULL,
 
     filename               VARCHAR(255) NOT NULL,
     content_type           VARCHAR(127) NOT NULL,
@@ -110,8 +110,8 @@ CREATE TABLE IF NOT EXISTS documents (
 -- ------------------------------------------------- document_extractions
 -- The AI output. One row per document, replaced in place on reprocess.
 CREATE TABLE IF NOT EXISTS document_extractions (
-    id                   BIGINT      NOT NULL AUTO_INCREMENT,
-    document_id          BIGINT      NOT NULL,
+    id                   INT         NOT NULL AUTO_INCREMENT,
+    document_id          INT         NOT NULL,
 
     -- LONGTEXT, not TEXT: TEXT caps at 64 KB, which a 40-page scan exceeds.
     raw_text             LONGTEXT    NOT NULL,
@@ -142,7 +142,7 @@ CREATE TABLE IF NOT EXISTS document_extractions (
     updated_at           DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP
                                      ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
-    UNIQUE KEY uq_document_extractions_document (document_id),
+    UNIQUE KEY ix_document_extractions_document_id (document_id),
     CONSTRAINT fk_extractions_document FOREIGN KEY (document_id)
         REFERENCES documents (id) ON DELETE CASCADE
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
@@ -151,8 +151,8 @@ CREATE TABLE IF NOT EXISTS document_extractions (
 -- Append-only audit trail. Answers "why did this fail at 2am, and which
 -- provider was to blame".
 CREATE TABLE IF NOT EXISTS document_events (
-    id          BIGINT       NOT NULL AUTO_INCREMENT,
-    document_id BIGINT       NOT NULL,
+    id          INT          NOT NULL AUTO_INCREMENT,
+    document_id INT          NOT NULL,
     event       VARCHAR(48)  NOT NULL,
     message     VARCHAR(512) NULL,
     payload     JSON         NOT NULL,

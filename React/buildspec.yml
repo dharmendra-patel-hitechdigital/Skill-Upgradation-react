@@ -1,0 +1,48 @@
+# CodeBuild spec for the React SPA.
+#
+# Build logic lives in scripts/ci.sh; this file owns only the CodeBuild-specific
+# parts. Note that VITE_API_BASE_URL is a BUILD-time input, not a runtime one -
+# Vite inlines it into the bundle, which is why the same commit yields a
+# different image per environment.
+#
+# Runs no tests: the API project gates on the suite, and these two projects run
+# in parallel. The docker build itself fails if the bundle does not compile,
+# which is the check that matters here.
+#
+# Required environment (set by infra/cloudformation/40-pipeline.yaml):
+#   AWS_DEFAULT_REGION, ECR_REPOSITORY_URI, CONTAINER_NAME, VITE_API_BASE_URL
+#
+# Requires privilegedMode: true on the CodeBuild project (docker build).
+
+version: 0.2
+
+env:
+  variables:
+    # Same-origin default: the ALB routes /api/* to the API service, so the
+    # browser never makes a cross-origin request and CORS never applies.
+    VITE_API_BASE_URL: "/api/v1"
+
+phases:
+  pre_build:
+    commands:
+      - echo "--- ecr login ---"
+      - aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$ECR_REPOSITORY_URI"
+      - IMAGE_TAG=$(echo "${CODEBUILD_RESOLVED_SOURCE_VERSION:-$CODEBUILD_BUILD_NUMBER}" | cut -c 1-12)
+      - export REGISTRY="${ECR_REPOSITORY_URI%/*}"
+      - PROJECT_NAME="${ECR_REPOSITORY_URI##*/}"
+      - export PROJECT_NAME="${PROJECT_NAME%-web}"
+      - echo "Registry $REGISTRY, project $PROJECT_NAME, tag $IMAGE_TAG, API base $VITE_API_BASE_URL"
+
+  build:
+    commands:
+      - ./scripts/ci.sh build "$IMAGE_TAG" web
+
+  post_build:
+    commands:
+      - ./scripts/ci.sh push "$IMAGE_TAG" web
+      - printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$ECR_REPOSITORY_URI:$IMAGE_TAG" > imagedefinitions.json
+      - cat imagedefinitions.json
+
+artifacts:
+  files:
+    - imagedefinitions.json

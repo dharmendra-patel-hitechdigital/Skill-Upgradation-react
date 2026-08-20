@@ -1,0 +1,241 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Skill-Upgradation data layer: RDS MySQL, the S3 document bucket, and the
+  Secrets Manager entries the ECS task definitions read from. Stateful - a
+  DeletionPolicy of Snapshot guards the database against a careless stack delete.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: skill-upgradation
+    AllowedPattern: "^[a-z][a-z0-9-]{2,30}$"
+
+  DbEngineVersion:
+    Type: String
+    Default: "8.4.6"
+    Description: >
+      Matches the mysql:8.4 image the local docker-compose stack runs, so a
+      migration that works locally behaves the same here. RDS requires a full
+      version - a bare "8.4" is rejected.
+
+  DbInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+    Description: db.t4g.micro is free-tier eligible; use db.t4g.small or larger for production.
+
+  DbAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+
+  DbName:
+    Type: String
+    Default: appdb
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{0,62}$"
+
+  DbUsername:
+    Type: String
+    Default: appadmin
+    # "admin" and "root" are reserved by RDS for MySQL and the create fails.
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{0,15}$"
+
+  MultiAz:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Roughly doubles cost. Set true for production.
+
+Conditions:
+  IsMultiAz: !Equals [!Ref MultiAz, "true"]
+
+Resources:
+  # ------------------------------------------------------------------ secrets
+  # The password is generated here and never leaves AWS - it is not a template
+  # parameter, so it cannot end up in a CloudFormation event, a shell history,
+  # or a git diff. ECS reads it by ARN at task start.
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ProjectName}/rds/credentials"
+      Description: !Sub "Master credentials for the ${ProjectName} RDS instance"
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username":"${DbUsername}"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        # RDS rejects these outright. Everything else - including "#", "$" and
+        # "/" - is allowed, which is exactly why the app percent-encodes the
+        # password itself rather than trusting a hand-written URL.
+        ExcludeCharacters: '"@/\ '
+
+  AppSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ProjectName}/app/secrets"
+      Description: >
+        Application secrets. SECRET_KEY is generated; OPENAI_API_KEY is created
+        empty on purpose - fill it in with `aws secretsmanager put-secret-value`
+        (or the console) and the API falls back to its offline analyzer until
+        you do.
+      GenerateSecretString:
+        SecretStringTemplate: '{"OPENAI_API_KEY":""}'
+        GenerateStringKey: SECRET_KEY
+        PasswordLength: 48
+        ExcludePunctuation: true
+
+  DbSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DbSecret
+      TargetId: !Ref Database
+      TargetType: AWS::RDS::DBInstance
+
+  # ---------------------------------------------------------------------- rds
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${ProjectName} private database subnets"
+      SubnetIds:
+        - Fn::ImportValue: !Sub "${ProjectName}-PrivateSubnetA"
+        - Fn::ImportValue: !Sub "${ProjectName}-PrivateSubnetB"
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} RDS MySQL"
+      VpcId:
+        Fn::ImportValue: !Sub "${ProjectName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub "${ProjectName}-ServiceSecurityGroupId"
+          Description: MySQL from the ECS tasks
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId:
+            Fn::ImportValue: !Sub "${ProjectName}-BuildSecurityGroupId"
+          Description: MySQL from the Alembic migration stage
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-db-sg"
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    # Snapshot, not Delete: `cfn delete` on the wrong stack should cost time,
+    # not the data. Retain the snapshot manually after a genuine teardown.
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "${ProjectName}-mysql"
+      Engine: mysql
+      EngineVersion: !Ref DbEngineVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbAllocatedStorage
+      MaxAllocatedStorage: 100        # storage autoscaling ceiling
+      DBName: !Ref DbName
+      MasterUsername: !Ref DbUsername
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:password}}"
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DbSecurityGroup
+      # The instance sits in private subnets with no internet route; this makes
+      # that explicit rather than incidental.
+      PubliclyAccessible: false
+      StorageEncrypted: true
+      StorageType: gp3
+      MultiAZ: !If [IsMultiAz, true, false]
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: "02:00-03:00"
+      PreferredMaintenanceWindow: "sun:03:30-sun:04:30"
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: false       # flip to true once the environment is real
+      EnableCloudwatchLogsExports:
+        - error
+        - slowquery
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-mysql"
+
+  # ----------------------------------------------------------------------- s3
+  # STORAGE_BACKEND=s3 is not optional once more than one task runs: a document
+  # uploaded to one task must be readable by the background processor on
+  # another, and Fargate task storage is not shared.
+  DocumentBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-documents-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-versions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  # Rejects any plaintext request outright rather than relying on every client
+  # remembering to use TLS.
+  DocumentBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DocumentBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt DocumentBucket.Arn
+              - !Sub "${DocumentBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+
+Outputs:
+  DbEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+    Export: { Name: !Sub "${ProjectName}-DbEndpoint" }
+  DbPort:
+    Value: !GetAtt Database.Endpoint.Port
+    Export: { Name: !Sub "${ProjectName}-DbPort" }
+  DbName:
+    Value: !Ref DbName
+    Export: { Name: !Sub "${ProjectName}-DbName" }
+  DbUsername:
+    Value: !Ref DbUsername
+    Export: { Name: !Sub "${ProjectName}-DbUsername" }
+  DbSecretArn:
+    Value: !Ref DbSecret
+    Export: { Name: !Sub "${ProjectName}-DbSecretArn" }
+  AppSecretArn:
+    Value: !Ref AppSecret
+    Export: { Name: !Sub "${ProjectName}-AppSecretArn" }
+  DocumentBucketName:
+    Value: !Ref DocumentBucket
+    Export: { Name: !Sub "${ProjectName}-DocumentBucketName" }
+  DocumentBucketArn:
+    Value: !GetAtt DocumentBucket.Arn
+    Export: { Name: !Sub "${ProjectName}-DocumentBucketArn" }

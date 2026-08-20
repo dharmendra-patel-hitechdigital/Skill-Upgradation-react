@@ -65,10 +65,29 @@ class Settings(BaseSettings):
     #   sqlite:///./app.db
     #   mysql+pymysql://user:pass@localhost:3306/appdb
     DATABASE_URL: str = f"sqlite:///{(BASE_DIR / 'app.db').as_posix()}"
+
+    # Discrete connection parts. When DB_HOST is set these are assembled into
+    # DATABASE_URL, overriding it. This exists for deployed environments where
+    # the password arrives on its own - an ECS task definition injects a single
+    # Secrets Manager JSON key as DB_PASSWORD, and cannot splice it into a URL.
+    # Assembling here also percent-encodes the credentials for us, which removes
+    # the most common cause of a "can't connect" that is really a parse error.
+    DB_HOST: str | None = None
+    DB_PORT: int = 3306
+    DB_NAME: str | None = None
+    DB_USER: str | None = None
+    DB_PASSWORD: str | None = None
+    DB_DIALECT: str = "mysql"
+
     DB_ECHO: bool = False
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
     DB_POOL_RECYCLE_SECONDS: int = 1800
+    # Seconds to wait for a new TCP connection + handshake. The async MySQL
+    # driver's own default is too aggressive for a cross-region managed database
+    # (e.g. an RDS instance in eu-north-1 reached from Asia), where the TLS
+    # handshake alone can exceed it and surface as a bare "Can't connect" 2003.
+    DB_CONNECT_TIMEOUT_SECONDS: int = 30
     # Create tables from the models on startup. Convenient locally, wrong in
     # production (it cannot ALTER, so it drifts). None -> on unless production.
     AUTO_CREATE_TABLES: bool | None = None
@@ -154,6 +173,29 @@ class Settings(BaseSettings):
     @classmethod
     def _upper_log_level(cls, value: Any) -> Any:
         return value.upper() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def _assemble_database_url(self) -> Settings:
+        """Build DATABASE_URL from the discrete DB_* parts when DB_HOST is set.
+
+        Runs before ``_guard_production_defaults`` (model validators fire in
+        definition order), so the production guards below see the final URL.
+
+        Credentials are percent-encoded here rather than by whoever wrote the
+        secret: a generated RDS password routinely contains ``/``, ``@`` or
+        ``%``, each of which silently changes how the URL parses.
+        """
+        if not self.DB_HOST:
+            return self
+
+        from urllib.parse import quote_plus
+
+        user = quote_plus(self.DB_USER or "")
+        auth = f"{user}:{quote_plus(self.DB_PASSWORD)}@" if self.DB_PASSWORD else f"{user}@"
+        self.DATABASE_URL = (
+            f"{self.DB_DIALECT}://{auth}{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME or ''}"
+        )
+        return self
 
     @model_validator(mode="after")
     def _guard_production_defaults(self) -> Settings:

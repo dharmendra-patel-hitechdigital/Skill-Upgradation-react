@@ -22,6 +22,14 @@ RUN pip wheel --wheel-dir /wheels -r requirements.txt
 # ---------------------------------------------------------------- runtime
 FROM python:3.12-slim AS runtime
 
+# Build provenance, stamped by the pipeline. `docker inspect` on a running task
+# then answers "which commit is this?" without a lookup in CodePipeline.
+ARG GIT_COMMIT=unknown
+ARG BUILD_TIME=unknown
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.created="${BUILD_TIME}" \
+      org.opencontainers.image.title="skill-upgradation-api"
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -62,3 +70,28 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 # handle placement. Multiple in-process workers would each run their own
 # background task runner and compete for the same documents.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+
+
+# ---------------------------------------------------------------- test
+# Built with `--target test`. Extends the runtime image rather than starting
+# fresh, so the suite exercises the exact interpreter, wheels and layout that
+# ship to production - the usual "passes in CI, fails in the image" gap comes
+# from testing somewhere the app never actually runs.
+#
+# Not part of the default build: `docker build` without --target stops at
+# runtime, so none of this reaches the deployed image.
+FROM runtime AS test
+
+USER root
+
+COPY requirements-dev.txt .
+# requirements.txt is already satisfied by the runtime stage; this resolves to
+# just the dev additions (pytest, ruff, mypy).
+RUN pip install --no-cache-dir -r requirements-dev.txt
+
+COPY --chown=app:app tests ./tests
+
+USER app
+
+# Overridden by docker-compose.ci.yml to run lint in the same pass.
+CMD ["pytest", "-q"]

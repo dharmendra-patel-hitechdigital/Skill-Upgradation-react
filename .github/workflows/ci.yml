@@ -1,0 +1,80 @@
+# Pull-request validation. Builds and tests, pushes nothing, touches no AWS
+# account - so it needs no credentials and is safe to run on fork PRs.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches-ignore: [main]   # main is handled by deploy.yml, which supersedes this
+  workflow_dispatch:
+
+# A new push to the same PR makes the previous run irrelevant. Without this,
+# three quick pushes queue three full runs and the useful one finishes last.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Buildx gives us the GitHub Actions layer cache, which is what keeps a
+      # containerized test run competitive with a native one.
+      - uses: docker/setup-buildx-action@v3
+
+      # No setup-python, no setup-node: the whole point of the containerized
+      # runner is that the toolchain lives in the image, not on the runner. The
+      # command below is byte-identical to what a developer runs locally.
+      - name: Lint and test in a container
+        run: ./scripts/ci.sh test
+
+  images:
+    name: Build images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Verifies both images assemble on a PR without pushing anything. A
+      # Dockerfile that only breaks at release time is the failure this prevents.
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./Python
+          target: runtime
+          push: false
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+
+      - name: Build web image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./React
+          push: false
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
+          build-args: |
+            VITE_API_BASE_URL=/api/v1
+            GIT_COMMIT=${{ github.sha }}
+
+  infra:
+    name: Validate CloudFormation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install cfn-lint
+      # Catches a malformed template before it fails half way through a stack
+      # update, which is far more expensive to unwind.
+      - run: cfn-lint infra/cloudformation/*.yaml infra/free-tier/cloudformation/*.yaml

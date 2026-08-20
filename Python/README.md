@@ -456,6 +456,38 @@ Then set `DATABASE_URL="mysql+pymysql://appuser:password@localhost:3306/appdb"`.
 If you provision with the SQL script rather than Alembic, run `alembic stamp head`
 so later migrations apply cleanly.
 
+### AWS RDS MySQL
+
+```dotenv
+DATABASE_URL="mysql+pymysql://admin:Pa55%23word@your-db.abc123.eu-north-1.rds.amazonaws.com:3306/appdb"
+DB_CONNECT_TIMEOUT_SECONDS=30
+AUTO_CREATE_TABLES=false
+```
+
+Three things reliably go wrong here:
+
+1. **Percent-encode the password.** It lives inside a URL, so `#` → `%23`,
+   `$` → `%24`, `@` → `%40`, `/` → `%2F`. `#` is the worst offender: it both
+   begins a comment in a `.env` file *and* starts a URL fragment, so an unencoded
+   password is silently truncated rather than rejected. Encode it with
+   `python -c "from urllib.parse import quote_plus; print(quote_plus(input()))"`.
+2. **Raise the connect timeout.** The async MySQL driver's default is too short
+   for a cross-region instance and fails as a bare `Can't connect to MySQL
+   server (2003)` — which looks like a security-group problem but is a timeout.
+3. **Open the security group.** RDS must allow inbound TCP 3306 from your IP.
+   Check reachability independently of the app:
+
+   ```bash
+   python -c "import socket;s=socket.socket();s.settimeout(10);s.connect(('your-db...rds.amazonaws.com',3306));print('reachable:',s.recv(16))"
+   ```
+
+Then apply the schema and confirm:
+
+```bash
+alembic upgrade head       # or `alembic stamp head` if you ran the SQL script
+alembic current            # should print the revision + "(head)"
+```
+
 > **SQLite is for development.** It serialises writers, so concurrent uploads can
 > hit "database is locked". Use MySQL or PostgreSQL for anything concurrent.
 

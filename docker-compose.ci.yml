@@ -1,0 +1,42 @@
+# Containerized CI. Runs lint and the test suite inside the same image the API
+# ships as, so a green run here means green anywhere:
+#
+#   docker compose -f docker-compose.ci.yml run --rm tests
+#
+# The point is that CI needs no Python, no Node, no pinned toolchain on the
+# runner - only Docker. It also removes the "works on my machine" gap in the
+# other direction: this is the identical command GitHub Actions runs.
+#
+# No database service: the suite runs on in-memory SQLite, which keeps it fast
+# and hermetic. MySQL-specific behaviour is covered by running the real stack
+# via docker-compose.yml.
+
+name: skill-upgradation-ci
+
+services:
+  tests:
+    build:
+      context: ./Python
+      dockerfile: Dockerfile
+      # Stops at the `test` stage, which layers pytest/ruff on top of runtime.
+      target: test
+    environment:
+      ENVIRONMENT: test
+      DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+      # Required because ENVIRONMENT is not local; never used to sign anything.
+      SECRET_KEY: ci-only-secret-key-not-used-by-any-deployed-environment
+    # Lint first: a syntax or import error should fail in a second, not after
+    # the full suite has run.
+    command: >
+      sh -c "ruff check . &&
+             pytest -q --junitxml=/tmp/junit.xml"
+
+  # `docker compose -f docker-compose.ci.yml build web` verifies the SPA
+  # compiles and the nginx image assembles. Vite inlines the API base URL at
+  # build time, so a broken value fails here rather than in the browser.
+  web:
+    build:
+      context: ./React
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api/v1

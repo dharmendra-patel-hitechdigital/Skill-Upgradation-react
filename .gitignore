@@ -1,1 +1,33 @@
 /Document
+
+# --- secrets -----------------------------------------------------------------
+# Nothing in a deployed environment reads these: AWS credentials come from the
+# task role, and application secrets come from Secrets Manager. A .env here is
+# always a local-only file, and always worth keeping out of the history.
+.env
+.env.*
+!.env.example
+
+# --- local build output ------------------------------------------------------
+node_modules/
+dist/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+junit.xml
+
+# --- infra scratch -----------------------------------------------------------
+# `aws cloudformation package` output and any locally rendered parameter files.
+packaged-*.yaml
+*-params.local.json
+
+# --- editors / OS ------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/

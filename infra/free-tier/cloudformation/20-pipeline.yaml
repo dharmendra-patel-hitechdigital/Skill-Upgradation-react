@@ -1,0 +1,256 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Skill-Upgradation free-tier CI/CD.
+
+    Source  ->  BuildAndDeploy (one CodeBuild project)
+
+  Collapsed into a single build action on purpose. CodeBuild's always-free
+  allowance is 100 build-minutes/month on general1.small, and CodePipeline's is
+  one active pipeline - so the design goal here is fewest actions and shortest
+  build, not maximum parallelism. The Fargate pipeline splits these into four
+  stages; this one cannot afford to.
+
+  Deployment is an SSM Run Command against the EC2 instance, which costs
+  nothing. CodeDeploy would also be free for EC2 but needs an agent, an appspec,
+  and a deployment group for no benefit at this size.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: skill-upgradation-free
+    AllowedPattern: "^[a-z][a-z0-9-]{2,30}$"
+
+  GitHubOwner:
+    Type: String
+
+  GitHubRepo:
+    Type: String
+
+  GitHubBranch:
+    Type: String
+    Default: main
+
+  CodeStarConnectionArn:
+    Type: String
+    Description: >
+      ARN of an existing CodeConnections connection to GitHub. Create it in the
+      console first (Developer Tools > Settings > Connections) - a connection
+      created by CloudFormation lands in PENDING and cannot be completed
+      programmatically.
+
+  PublicOrigin:
+    Type: String
+    Default: ""
+    Description: >
+      e.g. http://12.34.56.78 (the Elastic IP from the platform stack). Used for
+      CORS. Leave blank if you only reach the app through that same origin.
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub "${ProjectName}-artifacts-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          # S3's free allowance is 5 GB. Build artifacts are worthless after the
+          # next run, so they expire fast rather than quietly eating it.
+          - Id: expire-artifacts
+            Status: Enabled
+            ExpirationInDays: 7
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-codebuild"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codebuild.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: build-and-deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ProjectName}-*"
+              - Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion, s3:PutObject, s3:GetBucketAcl, s3:GetBucketLocation]
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "${ArtifactBucket.Arn}/*"
+              # Uploads the compose bundle the instance pulls during deploy.
+              - Effect: Allow
+                Action: [s3:PutObject, s3:DeleteObject, s3:ListBucket]
+                Resource:
+                  - !Sub
+                    - "arn:aws:s3:::${Bucket}"
+                    - Bucket: !ImportValue
+                        Fn::Sub: "${ProjectName}-DeployBucketName"
+                  - !Sub
+                    - "arn:aws:s3:::${Bucket}/*"
+                    - Bucket: !ImportValue
+                        Fn::Sub: "${ProjectName}-DeployBucketName"
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                Resource:
+                  - !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-api"
+                  - !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-web"
+              # The instance is located by tag, not by a hard-coded id - so the
+              # platform stack can replace it without the pipeline caring.
+              - Effect: Allow
+                Action: ec2:DescribeInstances
+                Resource: "*"
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}::document/AWS-RunShellScript"
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+                Condition:
+                  StringEquals:
+                    "ssm:resourceTag/DeployTarget": !Ref ProjectName
+              - Effect: Allow
+                Action: [ssm:GetCommandInvocation, ssm:ListCommandInvocations]
+                Resource: "*"
+
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${ProjectName}-build-deploy"
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts: { Type: CODEPIPELINE }
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: infra/free-tier/buildspec.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        # BUILD_GENERAL1_SMALL is the tier the 100 free build-minutes apply to.
+        # MEDIUM would be faster and would bill from the first minute.
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        PrivilegedMode: true          # required for `docker build`
+        EnvironmentVariables:
+          - Name: PROJECT_NAME
+            Value: !Ref ProjectName
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: API_REPOSITORY_URI
+            Value:
+              Fn::ImportValue: !Sub "${ProjectName}-ApiRepositoryUri"
+          - Name: WEB_REPOSITORY_URI
+            Value:
+              Fn::ImportValue: !Sub "${ProjectName}-WebRepositoryUri"
+          - Name: DEPLOY_BUCKET
+            Value:
+              Fn::ImportValue: !Sub "${ProjectName}-DeployBucketName"
+          - Name: PUBLIC_ORIGIN
+            Value: !Ref PublicOrigin
+      Cache:
+        # Local Docker layer cache keeps rebuilds well inside the free minutes.
+        Type: LOCAL
+        Modes: [LOCAL_DOCKER_LAYER_CACHE, LOCAL_CUSTOM_CACHE]
+      TimeoutInMinutes: 30
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Sub "/aws/codebuild/${ProjectName}-build-deploy"
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-codepipeline"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codepipeline.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: pipeline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion, s3:PutObject, s3:GetBucketVersioning]
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "${ArtifactBucket.Arn}/*"
+              - Effect: Allow
+                Action: [codebuild:StartBuild, codebuild:BatchGetBuilds]
+                Resource: !GetAtt BuildProject.Arn
+              - Effect: Allow
+                Action: codestar-connections:UseConnection
+                Resource: !Ref CodeStarConnectionArn
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub "${ProjectName}-pipeline"
+      RoleArn: !GetAtt PipelineRole.Arn
+      # V1, not V2: the free tier covers one active V1 pipeline per month.
+      # V2 bills per action execution and would leave the free tier immediately.
+      PipelineType: V1
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref CodeStarConnectionArn
+                FullRepositoryId: !Sub "${GitHubOwner}/${GitHubRepo}"
+                BranchName: !Ref GitHubBranch
+                DetectChanges: true
+              OutputArtifacts: [{ Name: SourceOutput }]
+              RunOrder: 1
+
+        - Name: BuildAndDeploy
+          Actions:
+            - Name: BuildAndDeploy
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref BuildProject
+              InputArtifacts: [{ Name: SourceOutput }]
+              RunOrder: 1
+
+Outputs:
+  PipelineUrl:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${Pipeline}/view?region=${AWS::Region}"
+  BuildLogsUrl:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/codesuite/codebuild/projects/${BuildProject}/history?region=${AWS::Region}"

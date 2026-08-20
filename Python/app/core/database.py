@@ -20,6 +20,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -50,12 +51,26 @@ def _engine_kwargs() -> dict[str, Any]:
         # pool across the event loop causes "database is locked" surprises.
         kwargs["poolclass"] = NullPool
         kwargs["connect_args"] = {"check_same_thread": False}
-    else:
-        kwargs.update(
-            pool_size=settings.DB_POOL_SIZE,
-            max_overflow=settings.DB_MAX_OVERFLOW,
-            pool_recycle=settings.DB_POOL_RECYCLE_SECONDS,
-        )
+        return kwargs
+
+    kwargs.update(
+        pool_size=settings.DB_POOL_SIZE,
+        max_overflow=settings.DB_MAX_OVERFLOW,
+        pool_recycle=settings.DB_POOL_RECYCLE_SECONDS,
+    )
+
+    # An explicit connection timeout matters for a managed database reached over
+    # the internet: without it the driver's own (short) default can expire during
+    # the TLS handshake and report a bare "Can't connect to MySQL server", which
+    # looks like a firewall problem rather than a timeout. The keyword differs per
+    # driver, so it is set per backend rather than blindly.
+    timeout = settings.DB_CONNECT_TIMEOUT_SECONDS
+    backend = make_url(settings.async_database_url).get_backend_name()
+    if backend in ("mysql", "mariadb"):
+        kwargs["connect_args"] = {"connect_timeout": timeout}
+    elif backend == "postgresql":
+        kwargs["connect_args"] = {"timeout": timeout}  # asyncpg spells it this way
+
     return kwargs
 
 

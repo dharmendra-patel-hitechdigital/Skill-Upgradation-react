@@ -19,8 +19,13 @@ services:
       - "3306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
-      # Anything in this directory runs once, on first initialisation only.
-      - ./db:/docker-entrypoint-initdb.d:ro
+      # db/schema_mysql.sql is NOT mounted into /docker-entrypoint-initdb.d.
+      # It is a DBA-facing alternative to Alembic rather than a companion to it:
+      # running it on first initialisation creates the tables, and the
+      # `alembic upgrade head` in the api command below then fails on
+      # `CREATE TABLE users` (the initial migration uses plain op.create_table).
+      # Alembic owns the schema. To use the SQL script instead, load it by hand
+      # and run `alembic stamp head`, as its own header explains.
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpassword"]
       interval: 10s

@@ -14,9 +14,10 @@ env/
 # Environment & secrets
 .env
 
-# Databases
+# Databases (including hand-made backups - they contain real password hashes)
 *.db
 *.sqlite3
+*.bak
 
 # Runtime state: uploaded documents and other local artefacts
 var/

@@ -1,0 +1,543 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Skill-Upgradation runtime: two Fargate services behind the shared ALB. The API
+  (FastAPI, :8000) takes /api/*, /docs, /redoc and /openapi.json; the SPA (nginx,
+  :80) takes everything else. Because both answer on one origin the browser never
+  makes a cross-origin call, so CORS is not in the request path at all.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: skill-upgradation
+    AllowedPattern: "^[a-z][a-z0-9-]{2,30}$"
+
+  ApiImageTag:
+    Type: String
+    Default: latest
+    Description: >
+      Only used for the FIRST deploy - after that CodePipeline overwrites the
+      image with an immutable commit-sha tag, so leaving this at "latest" does
+      not mean the running service is tracking "latest".
+
+  WebImageTag:
+    Type: String
+    Default: latest
+
+  PublicOrigin:
+    Type: String
+    Default: ""
+    Description: >
+      Public origin used for CORS, e.g. https://app.example.com. Leave blank to
+      use the ALB's own DNS name. Production refuses a "*" value.
+
+  ApiDesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    Description: >
+      Initial task count. Autoscaling moves this at runtime, so a later stack
+      update will briefly reset it to this value - keep it at the floor you are
+      happy to serve from.
+
+  WebDesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+
+  ApiCpu:
+    Type: String
+    Default: "512"
+    AllowedValues: ["256", "512", "1024", "2048"]
+
+  ApiMemory:
+    Type: String
+    Default: "1024"
+    AllowedValues: ["512", "1024", "2048", "4096"]
+
+  TextractEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Turn on to OCR scanned images. Grants Textract to the task role either way.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
+Conditions:
+  UseAlbOrigin: !Equals [!Ref PublicOrigin, ""]
+
+Resources:
+  # ------------------------------------------------------------------- logging
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}/api"
+      RetentionInDays: !Ref LogRetentionDays
+
+  WebLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}/web"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ---------------------------------------------------------------------- iam
+  # Two roles, deliberately: the EXECUTION role is used by the Fargate agent
+  # before the container starts (pull the image, fetch secrets, open the log
+  # stream). The TASK role is what the application code itself assumes. Merging
+  # them would hand the app permission to read every secret it is injected with.
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-ecs-execution"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: read-injected-secrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - Fn::ImportValue: !Sub "${ProjectName}-DbSecretArn"
+                  - Fn::ImportValue: !Sub "${ProjectName}-AppSecretArn"
+
+  ApiTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-ecs-task-api"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: document-storage
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  Fn::Sub:
+                    - "${BucketArn}/*"
+                    - BucketArn: !ImportValue
+                        Fn::Sub: "${ProjectName}-DocumentBucketArn"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource:
+                  Fn::ImportValue: !Sub "${ProjectName}-DocumentBucketArn"
+        - PolicyName: textract-ocr
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Textract is not resource-scopable for these calls; "*" is the
+              # only valid Resource. The task role is otherwise narrow.
+              - Effect: Allow
+                Action:
+                  - textract:DetectDocumentText
+                  - textract:AnalyzeDocument
+                Resource: "*"
+
+  WebTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-ecs-task-web"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      # nginx serves static files and calls nothing. No policies is correct.
+
+  # ----------------------------------------------------------- target groups
+  ApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-api-tg"
+      VpcId:
+        Fn::ImportValue: !Sub "${ProjectName}-VpcId"
+      Port: 8000
+      Protocol: HTTP
+      TargetType: ip                      # required for Fargate awsvpc networking
+      # /health/ready checks the database, so a task with a broken connection is
+      # pulled out of rotation instead of serving 500s. /health/live would keep
+      # it in - that endpoint exists for restart decisions, not routing ones.
+      HealthCheckPath: /api/v1/health/ready
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        # Long enough for an in-flight document upload to finish; the app's own
+        # background processing is not tied to the request, so this need not
+        # cover a full AI pipeline run.
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+
+  WebTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-web-tg"
+      VpcId:
+        Fn::ImportValue: !Sub "${ProjectName}-VpcId"
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /healthz
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "15"
+
+  # ---------------------------------------------------------- listener rules
+  # Lower priority number wins. The SPA's catch-all sits last so it only picks
+  # up what the API rules did not claim.
+  ApiRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Fn::ImportValue: !Sub "${ProjectName}-HttpListenerArn"
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: ["/api/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ApiTargetGroup
+
+  ApiDocsRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Fn::ImportValue: !Sub "${ProjectName}-HttpListenerArn"
+      Priority: 20
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            # FastAPI serves these outside the /api prefix. Consider removing
+            # this rule in production if the schema should not be public.
+            Values: ["/docs", "/docs/*", "/redoc", "/openapi.json"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ApiTargetGroup
+
+  WebRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Fn::ImportValue: !Sub "${ProjectName}-HttpListenerArn"
+      Priority: 100
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: ["/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref WebTargetGroup
+
+  # -------------------------------------------------------- task definitions
+  ApiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-api"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref ApiCpu
+      Memory: !Ref ApiMemory
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt ApiTaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        # This name is what Python/buildspec.yml writes into imagedefinitions.json.
+        # Renaming it here breaks the deploy action silently.
+        - Name: api
+          Image:
+            Fn::Sub:
+              - "${RepoUri}:${ApiImageTag}"
+              - RepoUri: !ImportValue
+                  Fn::Sub: "${ProjectName}-ApiRepositoryUri"
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+              Protocol: tcp
+          Environment:
+            - Name: ENVIRONMENT
+              Value: production
+            # Discrete DB parts: the password is a secret below, and a task
+            # definition cannot interpolate a secret into a URL string.
+            - Name: DB_HOST
+              Value:
+                Fn::ImportValue: !Sub "${ProjectName}-DbEndpoint"
+            - Name: DB_PORT
+              Value:
+                Fn::ImportValue: !Sub "${ProjectName}-DbPort"
+            - Name: DB_NAME
+              Value:
+                Fn::ImportValue: !Sub "${ProjectName}-DbName"
+            - Name: DB_USER
+              Value:
+                Fn::ImportValue: !Sub "${ProjectName}-DbUsername"
+            - Name: DB_DIALECT
+              Value: mysql
+            # Alembic owns the schema; create_all cannot express an ALTER and
+            # would drift. The migrate pipeline stage runs before this deploys.
+            - Name: AUTO_CREATE_TABLES
+              Value: "false"
+            - Name: STORAGE_BACKEND
+              Value: s3
+            - Name: S3_BUCKET
+              Value:
+                Fn::ImportValue: !Sub "${ProjectName}-DocumentBucketName"
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: TEXTRACT_ENABLED
+              Value: !Ref TextractEnabled
+            - Name: CORS_ORIGINS
+              Value: !If
+                - UseAlbOrigin
+                - Fn::ImportValue: !Sub "${ProjectName}-LoadBalancerDns"
+                - !Ref PublicOrigin
+            # One JSON object per line - what CloudWatch Logs Insights parses
+            # into queryable fields instead of an opaque message blob.
+            - Name: LOG_JSON
+              Value: "true"
+            - Name: LOG_LEVEL
+              Value: INFO
+          Secrets:
+            # "<arn>:<json-key>::" - the trailing empty version-stage and
+            # version-id fields mean "current". Omitting them is a syntax error.
+            - Name: DB_PASSWORD
+              ValueFrom:
+                Fn::Sub:
+                  - "${SecretArn}:password::"
+                  - SecretArn: !ImportValue
+                      Fn::Sub: "${ProjectName}-DbSecretArn"
+            - Name: SECRET_KEY
+              ValueFrom:
+                Fn::Sub:
+                  - "${SecretArn}:SECRET_KEY::"
+                  - SecretArn: !ImportValue
+                      Fn::Sub: "${ProjectName}-AppSecretArn"
+            - Name: OPENAI_API_KEY
+              ValueFrom:
+                Fn::Sub:
+                  - "${SecretArn}:OPENAI_API_KEY::"
+                  - SecretArn: !ImportValue
+                      Fn::Sub: "${ProjectName}-AppSecretArn"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ApiLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: api
+          # Container-level check, separate from the ALB's. This one decides
+          # whether ECS replaces the task; the ALB's decides whether to route.
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live', timeout=4).status == 200 else 1)\""
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+
+  WebTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-web"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt WebTaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: web
+          Image:
+            Fn::Sub:
+              - "${RepoUri}:${WebImageTag}"
+              - RepoUri: !ImportValue
+                  Fn::Sub: "${ProjectName}-WebRepositoryUri"
+          Essential: true
+          PortMappings:
+            - ContainerPort: 80
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WebLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: web
+          HealthCheck:
+            Command: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
+            Interval: 30
+            Timeout: 3
+            Retries: 3
+            StartPeriod: 10
+
+  # ------------------------------------------------------------------ services
+  ApiService:
+    Type: AWS::ECS::Service
+    # Without this the service is created before the ALB can route to its target
+    # group, every task fails its health check, and the deploy stalls.
+    DependsOn: [ApiRule, ApiDocsRule]
+    Properties:
+      ServiceName: !Sub "${ProjectName}-api"
+      Cluster:
+        Fn::ImportValue: !Sub "${ProjectName}-ClusterName"
+      TaskDefinition: !Ref ApiTaskDefinition
+      DesiredCount: !Ref ApiDesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      EnableExecuteCommand: true          # `aws ecs execute-command` for debugging
+      PropagateTags: SERVICE
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100        # never drop below current capacity
+        MaximumPercent: 200
+        # A bad image would otherwise sit in a crash loop until someone noticed.
+        # This rolls back to the last working task definition automatically.
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          # Private subnets + NAT. AssignPublicIp DISABLED is what keeps the
+          # tasks unreachable from the internet.
+          AssignPublicIp: DISABLED
+          Subnets:
+            - Fn::ImportValue: !Sub "${ProjectName}-PrivateSubnetA"
+            - Fn::ImportValue: !Sub "${ProjectName}-PrivateSubnetB"
+          SecurityGroups:
+            - Fn::ImportValue: !Sub "${ProjectName}-ServiceSecurityGroupId"
+      LoadBalancers:
+        - ContainerName: api
+          ContainerPort: 8000
+          TargetGroupArn: !Ref ApiTargetGroup
+      # Startup runs migrations-adjacent housekeeping and provider probes; this
+      # stops the ALB failing a task that is merely still booting.
+      HealthCheckGracePeriodSeconds: 60
+
+  WebService:
+    Type: AWS::ECS::Service
+    DependsOn: [WebRule]
+    Properties:
+      ServiceName: !Sub "${ProjectName}-web"
+      Cluster:
+        Fn::ImportValue: !Sub "${ProjectName}-ClusterName"
+      TaskDefinition: !Ref WebTaskDefinition
+      DesiredCount: !Ref WebDesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: LATEST
+      PropagateTags: SERVICE
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - Fn::ImportValue: !Sub "${ProjectName}-PrivateSubnetA"
+            - Fn::ImportValue: !Sub "${ProjectName}-PrivateSubnetB"
+          SecurityGroups:
+            - Fn::ImportValue: !Sub "${ProjectName}-ServiceSecurityGroupId"
+      LoadBalancers:
+        - ContainerName: web
+          ContainerPort: 80
+          TargetGroupArn: !Ref WebTargetGroup
+      HealthCheckGracePeriodSeconds: 30
+
+  # --------------------------------------------------------------- autoscaling
+  ApiScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub
+        - "service/${ClusterName}/${ServiceName}"
+        - ClusterName: !ImportValue
+            Fn::Sub: "${ProjectName}-ClusterName"
+          ServiceName: !GetAtt ApiService.Name
+      MinCapacity: !Ref ApiDesiredCount
+      MaxCapacity: 10
+      # RoleARN omitted on purpose: Application Auto Scaling creates and uses its
+      # own service-linked role for ECS. Naming the ARN explicitly fails the
+      # stack in a fresh account where that role does not exist yet.
+
+  ApiCpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${ProjectName}-api-cpu"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ApiScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 65
+        ScaleInCooldown: 300              # scale in slowly - flapping is worse than idle
+        ScaleOutCooldown: 60              # scale out fast
+
+  WebScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub
+        - "service/${ClusterName}/${ServiceName}"
+        - ClusterName: !ImportValue
+            Fn::Sub: "${ProjectName}-ClusterName"
+          ServiceName: !GetAtt WebService.Name
+      MinCapacity: !Ref WebDesiredCount
+      MaxCapacity: 6
+
+  WebCpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${ProjectName}-web-cpu"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref WebScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+Outputs:
+  # The public URL is an output of the network stack (LoadBalancerDns) - it is
+  # not repeated here, because re-exporting an imported value creates a second
+  # source of truth that can go stale.
+  ApiServiceName:
+    Value: !GetAtt ApiService.Name
+    Export: { Name: !Sub "${ProjectName}-ApiServiceName" }
+  WebServiceName:
+    Value: !GetAtt WebService.Name
+    Export: { Name: !Sub "${ProjectName}-WebServiceName" }
