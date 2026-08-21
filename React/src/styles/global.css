@@ -209,6 +209,33 @@ a { color: inherit; text-decoration: none; }
 .auth__remember { display: flex; align-items: center; gap: 7px; color: var(--text-muted); cursor: pointer; }
 .auth__forgot { color: var(--brand-600); font-weight: 600; }
 .auth__hint { margin-top: 22px; text-align: center; font-size: 13px; color: var(--text-muted); }
+
+/* Sign in <-> Create account cross-link at the foot of both auth forms. */
+.auth__switch {
+  margin-top: 22px;
+  text-align: center;
+  font-size: 13.5px;
+  color: var(--text-muted);
+}
+.auth__switch a { color: var(--brand-600); font-weight: 600; }
+
+/* Password rules, shown before the user submits rather than as an error after. */
+.auth__policy {
+  margin: -8px 0 20px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+/* Success counterpart to .auth__alert - e.g. "Account created. Please sign in." */
+.auth__notice {
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+  border-radius: 10px;
+  padding: 11px 14px;
+  margin-bottom: 18px;
+  font-size: 13.5px;
+}
 .auth__hint code {
   background: var(--brand-50);
   color: var(--brand-700);

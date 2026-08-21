@@ -54,18 +54,50 @@ export async function handleMockRequest(path, { method, body, token }) {
 
   // --- Auth ---
   if (path === '/auth/login' && method === 'POST') {
-    const { email, password } = body || {}
-    if (email?.trim().toLowerCase() === DEMO_USER.email && password === DEMO_PASSWORD) {
-      return { token: 'mock-jwt-token.' + btoa(email), user: DEMO_USER }
+    // `username` is what the real backend's OAuth2 form expects, and what
+    // auth.api.js therefore sends. `email` stays accepted so an older caller
+    // does not silently fail here.
+    const { username, email, password } = body || {}
+    const identifier = username ?? email
+    if (identifier?.trim().toLowerCase() === DEMO_USER.email && password === DEMO_PASSWORD) {
+      // Mirrors the real response so auth.api.js can map both the same way.
+      return {
+        access_token: 'mock-jwt-token.' + btoa(identifier),
+        refresh_token: 'mock-refresh-token.' + btoa(identifier),
+        token_type: 'bearer',
+        expires_in: 1800,
+        user: DEMO_USER,
+      }
     }
     throw new ApiError('Invalid email or password.', 401)
+  }
+
+  if (path === '/auth/register' && method === 'POST') {
+    const { email, full_name: fullName, password } = body || {}
+    if (email?.trim().toLowerCase() === DEMO_USER.email) {
+      throw new ApiError('That email is already registered.', 409)
+    }
+    if (!password || password.length < 10) {
+      throw new ApiError('Password must be at least 10 characters long.', 422)
+    }
+    // Returns the created profile and no tokens, exactly as the real endpoint
+    // does, so the sign-in that follows is exercised offline too.
+    return {
+      ...DEMO_USER,
+      id: 2,
+      email: email.trim().toLowerCase(),
+      full_name: fullName ?? null,
+      role: 'user',
+    }
   }
 
   // Everything below requires a valid token.
   if (!token) throw new ApiError('Not authenticated.', 401)
 
-  if (path === '/auth/me' && method === 'GET') {
-    return { user: DEMO_USER }
+  // Matches the real backend: the profile lives under /users, not /auth, and
+  // the user object is returned unwrapped.
+  if (path === '/users/me' && method === 'GET') {
+    return DEMO_USER
   }
 
   if (path === '/dashboard/stats' && method === 'GET') {

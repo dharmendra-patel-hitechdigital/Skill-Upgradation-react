@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate, useLocation, Navigate } from 'react-router-dom'
+import { Link, useNavigate, useLocation, Navigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth.js'
 import { useDocumentTitle } from '../hooks/useDocumentTitle.js'
 import Button from '../components/ui/Button.jsx'
@@ -13,6 +13,9 @@ export default function Login() {
   const navigate = useNavigate()
   const location = useLocation()
   const from = location.state?.from?.pathname || '/dashboard'
+  // Set by Register when the account was created but the automatic sign-in
+  // afterwards did not go through.
+  const notice = location.state?.notice
 
   const [form, setForm] = useState({ email: '', password: '' })
   const [showPassword, setShowPassword] = useState(false)
@@ -80,6 +83,7 @@ export default function Login() {
           <h2 className="auth__title">Welcome back</h2>
           <p className="auth__subtitle">Please enter your details to sign in.</p>
 
+          {notice && <div className="auth__notice">{notice}</div>}
           {submitError && <div className="auth__alert">{submitError}</div>}
 
           <Input
@@ -124,8 +128,8 @@ export default function Login() {
             Sign in
           </Button>
 
-          <p className="auth__hint">
-            Demo credentials — <code>demo@hitech.com</code> / <code>password123</code>
+          <p className="auth__switch">
+            New here? <Link to="/register">Create an account</Link>
           </p>
         </form>
       </div>
