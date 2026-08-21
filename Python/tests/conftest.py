@@ -16,11 +16,13 @@ Consequences worth knowing:
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import tempfile
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 TEST_ROOT = Path(tempfile.mkdtemp(prefix="ids-tests-"))
 
@@ -192,6 +194,41 @@ async def drain_processing() -> None:
     task_runner.reopen()
 
 
+@contextlib.contextmanager
+def paused_processing() -> Iterator[list[str]]:
+    """Accept pipeline submissions but never start them.
+
+    Required by any test that asserts on a *non-terminal* status (``pending`` /
+    ``processing``), because the pipeline runs in-process on the test's own event
+    loop. ``schedule_processing`` only calls ``asyncio.create_task``, so the work
+    starts at the next ``await`` - and with SQLite, local OCR and the heuristic
+    analyser there is no real I/O to wait on, so it can run to *completion*
+    before the next request is even handled. Uploading and hoping to outrun it
+    is a race that resolves differently on a fast machine: it is exactly why
+    ``/text`` returned 200 and ``/reprocess`` returned 202 in CI while both
+    passed locally.
+
+    Yields the list of task names that were requested, so a test can also assert
+    that the pipeline *would* have been queued.
+    """
+    submitted: list[str] = []
+    original = task_runner.submit
+
+    def _capture(
+        coro_factory: Callable[[], Awaitable[Any]], *, name: str
+    ) -> None:
+        # Deliberately does not call the factory: an un-awaited coroutine would
+        # raise "coroutine was never awaited" at collection time.
+        submitted.append(name)
+        return None
+
+    task_runner.submit = _capture  # type: ignore[method-assign]
+    try:
+        yield submitted
+    finally:
+        task_runner.submit = original  # type: ignore[method-assign]
+
+
 async def upload(
     client: AsyncClient,
     token: str,
@@ -232,6 +269,7 @@ __all__ = [
     "drain_processing",
     "invoice_pdf",
     "login",
+    "paused_processing",
     "register",
     "upload",
 ]

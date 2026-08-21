@@ -52,3 +52,19 @@ phases:
 artifacts:
   files:
     - imagedefinitions.json
+
+# Publishes the suite to the CodeBuild "Reports" tab: pass/fail per test, the
+# failure message, and history across builds. Declared rather than left to
+# auto-discovery, which scanned `**/*`, found nothing (the junit file never left
+# the container) and logged "No matching auto-discover report paths found".
+#
+# Reports are collected even when the build FAILS - which is the case that
+# matters, because it turns "exit status 1" into the name of the failing test
+# without reading the log. Requires the codebuild:*Report* permissions on the
+# project's service role; see infra/free-tier/cloudformation/20-pipeline.yaml.
+reports:
+  pytest:
+    files:
+      - "junit.xml"
+    base-directory: "test-reports"
+    file-format: JUNITXML

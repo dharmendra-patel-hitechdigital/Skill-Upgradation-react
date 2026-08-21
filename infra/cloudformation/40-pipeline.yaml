@@ -117,6 +117,19 @@ Resources:
                 Resource:
                   - !GetAtt ArtifactBucket.Arn
                   - !Sub "${ArtifactBucket.Arn}/*"
+              # Publishing the pytest report declared in the buildspec. Without
+              # these the build fails at the report-upload step with
+              # AccessDeniedException, having already passed its tests. The
+              # report group is created on first use and named
+              # "<project>-pytest", so the ARN can be scoped rather than "*".
+              - Effect: Allow
+                Action:
+                  - codebuild:CreateReportGroup
+                  - codebuild:CreateReport
+                  - codebuild:UpdateReport
+                  - codebuild:BatchPutTestCases
+                  - codebuild:BatchPutCodeCoverages
+                Resource: !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/*"
               # GetAuthorizationToken is account-wide by definition - it returns
               # a registry token, not a per-repository one, so it cannot be
               # scoped. The push/pull actions below are scoped.

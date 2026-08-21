@@ -21,6 +21,8 @@ __pycache__/
 .coverage*
 htmlcov/
 junit.xml
+# CI test reports, bind-mounted out of the test container for the build to publish.
+test-reports/
 
 # --- infra scratch -----------------------------------------------------------
 # `aws cloudformation package` output and any locally rendered parameter files.

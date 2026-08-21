@@ -16,6 +16,7 @@ from tests.conftest import (
     drain_processing,
     invoice_pdf,
     login,
+    paused_processing,
     register,
     upload,
 )
@@ -26,11 +27,14 @@ async def test_upload_returns_202_pending_before_processing(
     client: AsyncClient, api: str, user_tokens: dict
 ) -> None:
     """The request must not block on OCR + analysis."""
-    response = await client.post(
-        f"{api}/documents",
-        files={"file": ("invoice.pdf", invoice_pdf(), "application/pdf")},
-        headers=auth_header(user_tokens["access_token"]),
-    )
+    # Paused: every assertion below describes the state *before* the pipeline
+    # runs, and the pipeline shares this event loop (see paused_processing).
+    with paused_processing() as queued:
+        response = await client.post(
+            f"{api}/documents",
+            files={"file": ("invoice.pdf", invoice_pdf(), "application/pdf")},
+            headers=auth_header(user_tokens["access_token"]),
+        )
     assert response.status_code == 202
 
     body = response.json()
@@ -40,8 +44,8 @@ async def test_upload_returns_202_pending_before_processing(
     assert body["size_bytes"] > 0
     assert len(body["checksum_sha256"]) == 64
     assert [event["event"] for event in body["events"]] == ["uploaded"]
-
-    await drain_processing()
+    # 202 is only honest if the work was actually handed to the runner.
+    assert queued == [f"process-document-{body['id']}"]
 
 
 async def test_full_pipeline_extracts_and_analyses_an_invoice(
@@ -332,13 +336,13 @@ async def test_text_endpoint_conflicts_before_processing(
     client: AsyncClient, api: str, user_tokens: dict
 ) -> None:
     token = user_tokens["access_token"]
-    pending = await upload(client, token, process=False)
-
-    response = await client.get(
-        f"{api}/documents/{pending['id']}/text", headers=auth_header(token)
-    )
+    with paused_processing():
+        pending = await upload(client, token, process=False)
+        response = await client.get(
+            f"{api}/documents/{pending['id']}/text", headers=auth_header(token)
+        )
     assert response.status_code == 409
-    await drain_processing()
+    assert response.json()["error"]["code"] == "document_not_ready"
 
 
 async def test_download_returns_the_original_bytes(
@@ -448,16 +452,15 @@ async def test_ask_requires_a_completed_document(
     client: AsyncClient, api: str, user_tokens: dict
 ) -> None:
     token = user_tokens["access_token"]
-    pending = await upload(client, token, process=False)
-
-    response = await client.post(
-        f"{api}/documents/{pending['id']}/ask",
-        json={"question": "What is the total?"},
-        headers=auth_header(token),
-    )
+    with paused_processing():
+        pending = await upload(client, token, process=False)
+        response = await client.post(
+            f"{api}/documents/{pending['id']}/ask",
+            json={"question": "What is the total?"},
+            headers=auth_header(token),
+        )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "document_not_ready"
-    await drain_processing()
 
 
 async def test_ask_validates_the_question(
@@ -523,14 +526,13 @@ async def test_reprocess_rejects_an_in_flight_document(
 ) -> None:
     """A second run would duplicate billable AI calls for no benefit."""
     token = user_tokens["access_token"]
-    pending = await upload(client, token, process=False)
-
-    response = await client.post(
-        f"{api}/documents/{pending['id']}/reprocess", headers=auth_header(token)
-    )
+    with paused_processing():
+        pending = await upload(client, token, process=False)
+        response = await client.post(
+            f"{api}/documents/{pending['id']}/reprocess", headers=auth_header(token)
+        )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "already_queued"
-    await drain_processing()
 
 
 # ---------------------------------------------------------------------- delete

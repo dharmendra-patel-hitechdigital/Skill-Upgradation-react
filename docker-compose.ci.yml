@@ -33,9 +33,17 @@ services:
     # pytest writing .pytest_cache fails with EACCES. Caches are worthless here
     # anyway - the container is destroyed after one run - so disabling them is
     # the honest fix rather than loosening ownership on the shipped image.
+    # The junit file is the build's test report, so it must outlive the
+    # container: `run --rm` destroys anything left in /tmp, which is why
+    # CodeBuild reported "No matching auto-discover report paths found" on every
+    # run and a red suite could only be diagnosed from raw logs. ci.sh creates
+    # this directory world-writable first - the test stage runs as uid 1001, and
+    # a bind-mount directory Docker creates itself is owned by root.
+    volumes:
+      - ./test-reports:/reports
     command: >
       sh -c "ruff check --no-cache . &&
-             pytest -q -p no:cacheprovider --junitxml=/tmp/junit.xml"
+             pytest -q -p no:cacheprovider --junitxml=/reports/junit.xml"
 
   # `docker compose -f docker-compose.ci.yml build web` verifies the SPA
   # compiles and the nginx image assembles. Vite inlines the API base URL at

@@ -66,6 +66,16 @@ wants() {
 
 cmd_test() {
   require_docker
+  # Where the container drops its junit report (bind-mounted in
+  # docker-compose.ci.yml) for the CI system to publish. Created here, not by
+  # Docker: a bind-mount directory Docker creates is root-owned, and the test
+  # stage runs as uid 1001, so pytest could not write into it. Cleared first so
+  # a crashed run cannot republish the previous run's results as this one's.
+  REPORT_DIR="${REPO_ROOT}/test-reports"
+  mkdir -p "$REPORT_DIR"
+  chmod 777 "$REPORT_DIR"
+  rm -f "$REPORT_DIR/junit.xml"
+
   log "Running lint + tests in a container"
   # --rm so a failed run leaves nothing for the next build to trip over.
   docker compose -f "${REPO_ROOT}/docker-compose.ci.yml" run --rm tests
