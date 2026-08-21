@@ -45,6 +45,18 @@ Parameters:
     Type: String
     Default: "8.4.6"
 
+  DbBackupRetentionDays:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 35
+    Description: >
+      Days of automated backups. Accounts on the 2025 credit-based Free Plan are
+      capped well below the old default of 7 and reject anything higher with
+      "backup retention period exceeds the maximum available to free tier
+      customers" - so this defaults to 1. Set 0 to disable automated backups
+      entirely if even 1 is refused; set 7 or more on a paid account.
+
   AllowedHttpCidr:
     Type: String
     Default: 0.0.0.0/0
@@ -192,7 +204,9 @@ Resources:
       PubliclyAccessible: false
       StorageEncrypted: true
       MultiAZ: false                  # Multi-AZ is not free-tier eligible
-      BackupRetentionPeriod: 7
+      # Not hard-coded: the Free Plan caps this, and a value above the cap fails
+      # the whole stack. See the DbBackupRetentionDays parameter.
+      BackupRetentionPeriod: !Ref DbBackupRetentionDays
       # Storage autoscaling is deliberately NOT enabled: it would silently grow
       # past the 20 GB free allowance and start billing.
       AutoMinorVersionUpgrade: true
