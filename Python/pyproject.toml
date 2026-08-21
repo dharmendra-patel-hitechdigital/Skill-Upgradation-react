@@ -10,6 +10,16 @@ requires-python = ">=3.11"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+# `tests/` has no __init__.py, so pytest's default prepend import mode puts
+# `tests/` on sys.path rather than the project root - and conftest.py imports
+# both `app.*` and `tests.pdf_builder`, which then resolve to nothing.
+#
+# It works when invoked as `python -m pytest`, which adds the cwd itself, and
+# fails on the bare `pytest` console script, which does not. The container runs
+# the console script, so CI hit "ModuleNotFoundError: No module named 'app'"
+# (pytest exit 4) where local runs were green. Setting it here makes both paths
+# behave the same.
+pythonpath = ["."]
 addopts = "-q --strict-markers --strict-config"
 filterwarnings = [
     "error::DeprecationWarning:app.*",
