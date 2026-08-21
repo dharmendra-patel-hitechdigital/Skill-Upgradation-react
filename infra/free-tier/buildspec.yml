@@ -41,6 +41,16 @@ phases:
 
   post_build:
     commands:
+      # CodeBuild runs post_build even when build FAILED, so this phase has to
+      # check for itself. Without the guard a red test run still ships the
+      # compose bundle and tells the instance to pull a tag that was never
+      # pushed - which fails confusingly with "manifest unknown", and on a
+      # re-run of an already-pushed commit would deploy code whose tests failed.
+      - |
+        if [ "${CODEBUILD_BUILD_SUCCEEDING:-1}" != "1" ]; then
+          echo "Build phase failed - refusing to deploy." >&2
+          exit 1
+        fi
       # The nginx routing config is shared with the local stack rather than
       # duplicated, so local and deployed routing cannot drift.
       - cp infra/local/edge.nginx.conf infra/free-tier/compose/edge.nginx.conf

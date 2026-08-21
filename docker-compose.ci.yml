@@ -27,9 +27,15 @@ services:
       SECRET_KEY: ci-only-secret-key-not-used-by-any-deployed-environment
     # Lint first: a syntax or import error should fail in a second, not after
     # the full suite has run.
+    #
+    # Both tools run cache-less on purpose. The image's WORKDIR /app is owned by
+    # root while the process runs as uid 1001, so ruff writing .ruff_cache or
+    # pytest writing .pytest_cache fails with EACCES. Caches are worthless here
+    # anyway - the container is destroyed after one run - so disabling them is
+    # the honest fix rather than loosening ownership on the shipped image.
     command: >
-      sh -c "ruff check . &&
-             pytest -q --junitxml=/tmp/junit.xml"
+      sh -c "ruff check --no-cache . &&
+             pytest -q -p no:cacheprovider --junitxml=/tmp/junit.xml"
 
   # `docker compose -f docker-compose.ci.yml build web` verifies the SPA
   # compiles and the nginx image assembles. Vite inlines the API base URL at
