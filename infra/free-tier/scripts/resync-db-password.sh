@@ -38,6 +38,34 @@ aws sts get-caller-identity >/dev/null || die "AWS credentials are not configure
 DB_ID="${PROJECT_NAME}-mysql"
 PARAM="/${PROJECT_NAME}/DB_PASSWORD"
 
+# Tries each generator in turn rather than assuming one. On Windows, `python3`
+# is often the Microsoft Store stub that prints an install message and exits
+# non-zero, and `python` may not be on PATH outside an activated venv - so a
+# hard-coded interpreter turns this script into a coin flip. openssl is the
+# backstop; Git Bash ships it.
+generate_password() {
+  local out
+  for py in python python3 py; do
+    command -v "$py" >/dev/null 2>&1 || continue
+    out="$("$py" -c "import secrets,string; a=string.ascii_letters+string.digits; print(''.join(secrets.choice(a) for _ in range(32)))" 2>/dev/null || true)"
+    # 32 alphanumerics and nothing else, or it was the Store stub talking.
+    if printf '%s' "$out" | grep -Eq '^[A-Za-z0-9]{32}$'; then
+      printf '%s' "$out"
+      return 0
+    fi
+  done
+  if command -v openssl >/dev/null 2>&1; then
+    # base64 then strip the non-alphanumerics, taking 32 from a longer draw so
+    # the result is still 32 characters after +, / and = are removed.
+    out="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | cut -c 1-32)"
+    if printf '%s' "$out" | grep -Eq '^[A-Za-z0-9]{32}$'; then
+      printf '%s' "$out"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 # ---------------------------------------------------------------- 1. the value
 if [ "$ROTATE" = true ]; then
   # Alphanumeric only, deliberately. A generated password containing $ or # is
@@ -46,7 +74,8 @@ if [ "$ROTATE" = true ]; then
   # different string than the one that was stored. Dropping the symbols removes
   # that entire class of failure for the sake of a few bits of entropy that a
   # 32-character alphanumeric password more than covers.
-  PW="$(python -c "import secrets,string; a=string.ascii_letters+string.digits; print(''.join(secrets.choice(a) for _ in range(32)))")"
+  PW="$(generate_password)"
+  [ -n "$PW" ] || die "Could not generate a password: no working python or openssl found."
   log "Generated a new 32-character password"
   aws ssm put-parameter --region "$AWS_REGION" --name "$PARAM" \
     --type SecureString --value "$PW" --overwrite >/dev/null
