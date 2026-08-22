@@ -57,6 +57,33 @@ DB_PASSWORD="$(get_param DB_PASSWORD)"
 SECRET_KEY="$(get_param SECRET_KEY)"
 OPENAI_API_KEY="$(get_param OPENAI_API_KEY)"
 
+# The database endpoint is read here, not taken from app.env. UserData writes
+# app.env once at instance launch, so its DB_HOST goes stale the moment the
+# database is replaced or restored from a snapshot - and a stale hostname does
+# not fail loudly. It fails DNS resolution instantly, which the app reports as
+# "Can't connect to MySQL server": the API keeps serving, /health/live stays 200,
+# and every write returns a 500 in well under a second. That reads like an
+# application bug rather than a configuration one.
+#
+# The parameter is maintained by CloudFormation (DbHostParameter in
+# 10-platform.yaml), so it always matches the current endpoint. app.env remains
+# the fallback so an instance launched before that parameter existed still
+# deploys.
+DB_HOST_PARAM="$(get_param DB_HOST)"
+if [ -n "$DB_HOST_PARAM" ]; then
+  DB_HOST="$DB_HOST_PARAM"
+fi
+
+if [ -z "${DB_HOST:-}" ]; then
+  echo "No database host: /${PROJECT_NAME}/DB_HOST is not in Parameter Store and" \
+       "DB_HOST is not set in ${APP_DIR}/app.env. Deploy the platform stack to" \
+       "publish the parameter, or set it with:" \
+       "aws ssm put-parameter --name /${PROJECT_NAME}/DB_HOST --type String --value <endpoint> --overwrite" >&2
+  exit 1
+fi
+
+log "Database host: ${DB_HOST}"
+
 if [ -z "$DB_PASSWORD" ] || [ -z "$SECRET_KEY" ]; then
   echo "Missing /${PROJECT_NAME}/DB_PASSWORD or /${PROJECT_NAME}/SECRET_KEY in" \
        "Parameter Store. See infra/free-tier/README.md - CloudFormation cannot" \
@@ -84,6 +111,45 @@ compose() {
 
 log "Pulling images"
 compose pull
+
+# Verify the credentials BEFORE touching the running containers.
+#
+# Without this the failure mode is genuinely awful to diagnose: alembic dies on
+# a wall of SQLAlchemy stack frames whose actual cause - MySQL error 1045 - is
+# forty lines down, and if the containers happen to already be running they keep
+# serving 500s on every request that touches the database while /health/ready
+# reports 503 and nothing says why.
+log "Checking database credentials"
+if ! compose run --rm --no-deps api python -c "
+import asyncio, sys
+from sqlalchemy import text
+from app.core.database import engine
+async def main():
+    async with engine.connect() as c:
+        await c.execute(text('SELECT 1'))
+try:
+    asyncio.run(main())
+except Exception as exc:
+    print(type(exc).__name__, exc, file=sys.stderr)
+    sys.exit(1)
+" 2>/tmp/dbcheck.err; then
+  echo >&2
+  echo "Cannot authenticate to MySQL at ${DB_HOST} as appadmin." >&2
+  sed 's/^/  /' /tmp/dbcheck.err >&2
+  echo >&2
+  echo "If that says 'Access denied ... (1045)', the RDS master password and" >&2
+  echo "/${PROJECT_NAME}/DB_PASSWORD in Parameter Store have diverged. Reset RDS" >&2
+  echo "to match Parameter Store, which is the source of truth:" >&2
+  echo >&2
+  echo "  PW=\$(aws ssm get-parameter --name /${PROJECT_NAME}/DB_PASSWORD \\" >&2
+  echo "        --with-decryption --query Parameter.Value --output text)" >&2
+  echo "  aws rds modify-db-instance --db-instance-identifier ${PROJECT_NAME}-mysql \\" >&2
+  echo "        --master-user-password \"\$PW\" --apply-immediately" >&2
+  echo >&2
+  echo "Refusing to deploy - leaving the current containers untouched." >&2
+  exit 1
+fi
+log "Credentials OK"
 
 # Migrations run before the new containers take over, mirroring the Migrate
 # stage of the Fargate pipeline. A failure here stops the deploy with the old

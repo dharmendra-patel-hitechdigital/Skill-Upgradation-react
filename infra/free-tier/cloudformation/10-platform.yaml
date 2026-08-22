@@ -30,16 +30,13 @@ Parameters:
       Resolved at deploy time from the AWS-published SSM parameter, so the
       instance always launches on a current Amazon Linux 2023 image.
 
-  DbPassword:
-    Type: String
-    NoEcho: true
-    MinLength: 12
-    Description: >
-      RDS master password. Store the SAME value in SSM Parameter Store as
-      /<ProjectName>/DB_PASSWORD (SecureString) before deploying - CloudFormation
-      cannot create SecureString parameters, so that step is manual. See the
-      README. Generate one with:
-        python -c "import secrets; print(secrets.token_urlsafe(24))"
+  # No DbPassword parameter. The password is read straight out of SSM by the
+  # MasterUserPassword property below, so it exists in exactly one place.
+  #
+  # It used to be a NoEcho parameter that you also had to store in SSM by hand,
+  # and the two copies drifted the moment either side was changed alone - which
+  # surfaces as a completely unhelpful MySQL 1045 "Access denied" at runtime,
+  # long after the deploy reported success.
 
   DbEngineVersion:
     Type: String
@@ -176,17 +173,6 @@ Resources:
     Type: AWS::RDS::DBInstance
     DeletionPolicy: Snapshot
     UpdateReplacePolicy: Snapshot
-    Metadata:
-      cfn-lint:
-        config:
-          # W1011 wants a dynamic reference such as
-          # {{resolve:secretsmanager:...}} instead of a NoEcho parameter. The
-          # production stack (infra/cloudformation/20-data.yaml) does exactly
-          # that. Here it would mean a Secrets Manager secret at $0.40/month,
-          # which defeats the point of this template. A NoEcho parameter is
-          # masked in the console and in describe-stacks; the accepted cost is
-          # that the value passes through your shell once.
-          ignore_checks: [W1011]
     Properties:
       DBInstanceIdentifier: !Sub "${ProjectName}-mysql"
       Engine: mysql
@@ -198,7 +184,10 @@ Resources:
       StorageType: gp2
       DBName: appdb
       MasterUsername: appadmin
-      MasterUserPassword: !Ref DbPassword
+      # Single source of truth: /<ProjectName>/DB_PASSWORD in Parameter Store.
+      # Create it before deploying this stack - CloudFormation cannot create
+      # SecureString parameters, only read them.
+      MasterUserPassword: !Sub "{{resolve:ssm-secure:/${ProjectName}/DB_PASSWORD}}"
       DBSubnetGroupName: !Ref DbSubnetGroup
       VPCSecurityGroups: [!Ref DbSecurityGroup]
       PubliclyAccessible: false
@@ -212,6 +201,28 @@ Resources:
       AutoMinorVersionUpgrade: true
       DeletionProtection: false
       Tags: [{ Key: Name, Value: !Sub "${ProjectName}-mysql" }]
+
+  # Publishes the live RDS endpoint for deploy.sh to read on every deploy.
+  #
+  # This exists because the instance's UserData writes DB_HOST into
+  # /opt/app/app.env exactly once, at launch. Any event that gives the database a
+  # new endpoint - a replacement triggered by an update, a delete-and-recreate, a
+  # restore from the snapshot that DeletionPolicy leaves behind - leaves that file
+  # pointing at a hostname that no longer resolves. The failure is quiet and
+  # confusing: the API keeps serving, /health/live stays 200, and every write
+  # returns an opaque 500 in under a second.
+  #
+  # CloudFormation cannot create a SecureString (which is why DB_PASSWORD is
+  # manual), but a plain String is fine - a hostname is not a secret. Keeping it
+  # here means the value is updated by the same stack operation that changes the
+  # endpoint, so the two cannot drift.
+  DbHostParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ProjectName}/DB_HOST"
+      Type: String
+      Value: !GetAtt Database.Endpoint.Address
+      Description: !Sub "RDS endpoint for ${ProjectName}. Managed by CloudFormation - do not edit by hand."
 
   # ------------------------------------------------------------------- images
   ApiRepository:

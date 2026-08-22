@@ -1,0 +1,87 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+4 0 obj
+<< /Length 939 >>
+stream
+BT
+/F1 11 Tf
+15 TL
+72 760 Td
+(ACME TECHNOLOGIES LTD) Tj
+T*
+(123 Industrial Estate, Manchester, M1 4AB) Tj
+T*
+() Tj
+T*
+(TAX INVOICE) Tj
+T*
+() Tj
+T*
+(Invoice Number: INV-2024-00871) Tj
+T*
+(Invoice Date: 14/03/2024) Tj
+T*
+(Due Date: 13/04/2024) Tj
+T*
+(Purchase Order: PO-55231) Tj
+T*
+() Tj
+T*
+(Bill To: Northwind Trading Company) Tj
+T*
+(Contact Email: accounts@northwind-trading.example) Tj
+T*
+(Contact Phone: +44 161 496 0234) Tj
+T*
+() Tj
+T*
+(Description                 Qty     Unit Price      Amount) Tj
+T*
+(Managed hosting \(annual\)      1        960.00       960.00) Tj
+T*
+(Priority support add-on      12         15.00       180.00) Tj
+T*
+(Onboarding consultancy        4         25.00       100.00) Tj
+T*
+() Tj
+T*
+(Subtotal: 1240.00) Tj
+T*
+(Tax \(VAT 20%\): 248.00) Tj
+T*
+(Total Amount: 1488.00) Tj
+T*
+() Tj
+T*
+(Payment Terms: Net 30) Tj
+T*
+(Amount Due: 1488.00) Tj
+T*
+(Remit payment to Acme Technologies Ltd, account 40125566.) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 4 0 R >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000212 00000 n 
+0000001202 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1328
+%%EOF

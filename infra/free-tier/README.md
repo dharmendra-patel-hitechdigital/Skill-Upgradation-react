@@ -93,13 +93,14 @@ aws ssm put-parameter --region "$AWS_REGION" --name "/$PROJECT/SECRET_KEY" \
 aws ssm put-parameter --region "$AWS_REGION" --name "/$PROJECT/OPENAI_API_KEY" \
   --type SecureString --value ""
 
-echo "$DB_PASSWORD"   # you need this for the next step
 ```
 
 ### 4. Platform stack — ~12 min
 
-`DbPassword` **must** match the `/$PROJECT/DB_PASSWORD` parameter above: RDS
-gets it from here, the app reads it from Parameter Store.
+RDS reads its master password straight from `/$PROJECT/DB_PASSWORD` through a
+`{{resolve:ssm-secure:...}}` dynamic reference, so there is no password
+parameter to pass and nothing to keep in sync. Parameter Store is the single
+source of truth.
 
 ```bash
 aws cloudformation deploy \
@@ -109,12 +110,33 @@ aws cloudformation deploy \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
       ProjectName="$PROJECT" \
-      DbPassword="$DB_PASSWORD" \
       AllowedHttpCidr="0.0.0.0/0"
 ```
 
 > Lock `AllowedHttpCidr` to `<your-ip>/32` while testing. This serves **plain
 > HTTP** — a login password crosses the network in the clear.
+
+<details>
+<summary>Stacks created before this change: MySQL 1045 “Access denied”</summary>
+
+Earlier versions took a `DbPassword` stack parameter that you *also* stored in
+SSM by hand. The two copies drifted the moment either side changed alone, and
+the symptom was a bare `1045 Access denied` at runtime — long after the deploy
+reported success. Reset RDS to match Parameter Store:
+
+```bash
+PROJECT_NAME=skill-upgradation-free AWS_REGION=us-east-1 ./infra/free-tier/scripts/resync-db-password.sh --rotate
+```
+
+Run it from your machine, not the instance — the instance role has no
+`rds:ModifyDBInstance`, by design. It sets Parameter Store and RDS from one
+value, waits for the instance, then redeploys so `.env.runtime` is rewritten and
+migrations run.
+
+Resetting only the RDS password is the usual half-fix: `/opt/app/.env.runtime`
+still holds the older value, so the API keeps failing and it looks like the
+reset did not take.
+</details>
 
 Get the address:
 
