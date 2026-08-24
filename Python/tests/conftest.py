@@ -31,6 +31,13 @@ os.environ.update(
         "ENVIRONMENT": "test",
         "DEBUG": "false",
         "DATABASE_URL": f"sqlite:///{(TEST_ROOT / 'test.db').as_posix()}",
+        # Setting DATABASE_URL is not enough on its own: `_assemble_database_url`
+        # rebuilds it from the discrete DB_* parts whenever DB_HOST is set, and a
+        # developer with a real .env has one. Without this, the whole suite
+        # silently aims at the deployed MySQL instance - it hangs on the connect
+        # timeout, and would create and truncate tables in a live database if it
+        # ever reached one.
+        "DB_HOST": "",
         "SECRET_KEY": "test-only-secret-key-not-used-anywhere-real-0123456789",
         "ACCESS_TOKEN_EXPIRE_MINUTES": "30",
         "REFRESH_TOKEN_EXPIRE_DAYS": "7",

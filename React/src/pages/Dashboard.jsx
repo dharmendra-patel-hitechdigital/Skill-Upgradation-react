@@ -71,7 +71,10 @@ export default function Dashboard() {
               </section>
 
               <section className="content__grid">
-                <RevenueChart series={revenue.data?.series ?? []} />
+                <RevenueChart
+                  series={revenue.data?.series ?? []}
+                  meta={revenue.data?.meta}
+                />
                 <RecentActivity activity={activity.data?.activity ?? []} />
               </section>
             </>

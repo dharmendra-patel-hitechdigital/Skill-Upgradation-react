@@ -1,6 +1,19 @@
 import Card from '../ui/Card.jsx'
 
+/**
+ * Icon and tone per activity type.
+ *
+ * The first group matches the document lifecycle events the API reports
+ * (`/dashboard/activity`); the second is kept so an older payload still renders.
+ * Anything unrecognized falls back to `upload` rather than blanking the row.
+ */
 const TYPE_STYLES = {
+  upload: { icon: '⬆', tone: 'blue' },
+  processing: { icon: '◌', tone: 'violet' },
+  completed: { icon: '✓', tone: 'green' },
+  failed: { icon: '!', tone: 'red' },
+  reprocess: { icon: '↻', tone: 'violet' },
+
   order: { icon: '▤', tone: 'blue' },
   upgrade: { icon: '▲', tone: 'green' },
   refund: { icon: '↩', tone: 'red' },
@@ -17,7 +30,7 @@ export default function RecentActivity({ activity = [] }) {
 
       <ul className="activity-list">
         {activity.map((item) => {
-          const style = TYPE_STYLES[item.type] ?? TYPE_STYLES.order
+          const style = TYPE_STYLES[item.type] ?? TYPE_STYLES.upload
           return (
             <li className="activity-item" key={item.id}>
               <span className={`activity-item__icon activity-item__icon--${style.tone}`}>

@@ -164,7 +164,7 @@ app/
 │       └── registry.py        Provider selection & graceful degradation
 └── api/                       HTTP layer
     ├── deps.py                Auth, pagination, ownership-scoped loaders
-    └── v1/endpoints/          auth, users, documents, health
+    └── v1/endpoints/          auth, users, documents, dashboard, health
 ```
 
 **The dependency rule:** each layer depends only on the ones below it.
@@ -324,6 +324,25 @@ All paths are prefixed with `/api/v1`. Full interactive docs at `/docs`.
 | POST | `/documents/{id}/ask` | ✔ | Grounded natural-language Q&A |
 | POST | `/documents/{id}/reprocess` | ✔ | Re-run the pipeline |
 | DELETE | `/documents/{id}` | ✔ | Delete record, extraction, and blob |
+
+### Dashboard
+
+The three summary panels the SPA renders on sign-in. Each is a single aggregate
+query, scoped to **your own** documents — or to the whole installation when the
+caller is an admin. The scope is derived from the caller's role, never from a
+query parameter.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/dashboard/stats` | ✔ | Four headline metrics + change vs. the previous window (`?window_days=`, default 30) |
+| GET | `/dashboard/revenue` | ✔ | Uploads per calendar month (`?months=`, default 8, max 12) |
+| GET | `/dashboard/activity` | ✔ | Newest lifecycle events, human-readable (`?limit=`, default 8) |
+
+`/dashboard/revenue` keeps its path for compatibility with the deployed SPA
+bundle. This service stores no financial data, so the series behind that panel
+is **document volume**, and the response carries its own `meta.title` /
+`meta.subtitle` so the chart captions itself from the server rather than from a
+hard-coded label that could contradict the numbers.
 
 ### Health
 

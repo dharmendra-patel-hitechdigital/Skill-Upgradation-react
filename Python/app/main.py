@@ -108,6 +108,14 @@ TAGS_METADATA: list[dict[str, Any]] = [
             "questions, and reprocess."
         ),
     },
+    {
+        "name": "Dashboard",
+        "description": (
+            "Aggregated summary panels: headline stats, a monthly volume "
+            "series, and the recent-activity feed. Scoped to the caller's own "
+            "documents, or the whole installation for an admin."
+        ),
+    },
 ]
 
 

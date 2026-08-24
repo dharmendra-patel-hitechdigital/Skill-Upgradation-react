@@ -17,14 +17,21 @@ const DEMO_USER = {
 
 const DEMO_PASSWORD = 'password123'
 
+// The dashboard fixtures below mirror the real GET /dashboard/* responses field
+// for field. They used to describe a storefront (revenue, orders, refunds),
+// which meant offline development exercised a contract the backend never
+// served — the shape looked fine and every real deployment then showed the
+// wrong thing. Keep these in step with app/schemas/dashboard.py.
+const COMPARISON = 'vs. previous 30 days'
+
 const STATS = [
-  { id: 'revenue', label: 'Total Revenue', value: 84230, format: 'currency', delta: 12.5, trend: 'up' },
-  { id: 'users', label: 'Active Users', value: 2841, format: 'number', delta: 8.2, trend: 'up' },
-  { id: 'orders', label: 'New Orders', value: 1259, format: 'number', delta: -3.1, trend: 'down' },
-  { id: 'conversion', label: 'Conversion Rate', value: 4.7, format: 'percent', delta: 1.4, trend: 'up' },
+  { id: 'documents', label: 'Documents Processed', value: 128, format: 'number', delta: 12.5, trend: 'up', unit: null, comparison: COMPARISON },
+  { id: 'pages', label: 'Pages Extracted', value: 964, format: 'number', delta: 8.2, trend: 'up', unit: null, comparison: COMPARISON },
+  { id: 'data', label: 'Data Processed', value: 41.6, format: 'number', delta: -3.1, trend: 'down', unit: 'MB', comparison: COMPARISON },
+  { id: 'success_rate', label: 'Success Rate', value: 96.1, format: 'percent', delta: 1.4, trend: 'up', unit: null, comparison: COMPARISON },
 ]
 
-const REVENUE_SERIES = [
+const VOLUME_SERIES = [
   { label: 'Jan', value: 42 },
   { label: 'Feb', value: 51 },
   { label: 'Mar', value: 48 },
@@ -35,12 +42,20 @@ const REVENUE_SERIES = [
   { label: 'Aug', value: 84 },
 ]
 
+const SERIES_META = {
+  title: 'Document Volume',
+  subtitle: 'Documents uploaded per month, last 8 months',
+  unit: 'documents',
+  total: VOLUME_SERIES.reduce((sum, point) => sum + point.value, 0),
+  year: new Date().getFullYear(),
+}
+
 const ACTIVITY = [
-  { id: 1, user: 'Aarav Sharma', action: 'placed an order', amount: '$1,240', time: '2 min ago', type: 'order' },
-  { id: 2, user: 'Mia Chen', action: 'upgraded to Pro plan', amount: '$49', time: '18 min ago', type: 'upgrade' },
-  { id: 3, user: 'Liam Patel', action: 'requested a refund', amount: '$320', time: '1 hr ago', type: 'refund' },
-  { id: 4, user: 'Sofia Rossi', action: 'created an account', amount: '', time: '3 hr ago', type: 'signup' },
-  { id: 5, user: 'Noah Kim', action: 'placed an order', amount: '$890', time: '5 hr ago', type: 'order' },
+  { id: 412, user: 'Aarav Sharma', action: 'completed extraction on invoice-q3.pdf', amount: '248 KB', time: '2 min ago', type: 'completed', document_id: 87, filename: 'invoice-q3.pdf', document_type: 'invoice' },
+  { id: 411, user: 'Mia Chen', action: 'uploaded lease-agreement.pdf', amount: '1.4 MB', time: '18 min ago', type: 'upload', document_id: 86, filename: 'lease-agreement.pdf', document_type: null },
+  { id: 410, user: 'Liam Patel', action: 'failed to process scan-0042.png', amount: 'failed', time: '1 hr ago', type: 'failed', document_id: 85, filename: 'scan-0042.png', document_type: null },
+  { id: 409, user: 'Sofia Rossi', action: 'queued a reprocess of receipt-aug.pdf', amount: '96 KB', time: '3 hrs ago', type: 'reprocess', document_id: 84, filename: 'receipt-aug.pdf', document_type: 'receipt' },
+  { id: 408, user: 'Noah Kim', action: 'started processing contract-v2.pdf', amount: '512 KB', time: '5 hrs ago', type: 'processing', document_id: 83, filename: 'contract-v2.pdf', document_type: 'contract' },
 ]
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -101,11 +116,13 @@ export async function handleMockRequest(path, { method, body, token }) {
   }
 
   if (path === '/dashboard/stats' && method === 'GET') {
-    return { stats: STATS }
+    return { stats: STATS, window_days: 30, generated_at: new Date().toISOString() }
   }
 
+  // Still /revenue: the deployed bundle requests that path, so the real backend
+  // serves the volume series from it too rather than breaking older clients.
   if (path === '/dashboard/revenue' && method === 'GET') {
-    return { series: REVENUE_SERIES }
+    return { series: VOLUME_SERIES, meta: SERIES_META }
   }
 
   if (path === '/dashboard/activity' && method === 'GET') {
