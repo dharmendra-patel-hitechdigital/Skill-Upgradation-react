@@ -109,6 +109,14 @@ TAGS_METADATA: list[dict[str, Any]] = [
         ),
     },
     {
+        "name": "Settings",
+        "description": (
+            "Administrator-only runtime configuration - currently which AI "
+            "engine analyses documents. API keys are never set here; they "
+            "arrive as deployment secrets."
+        ),
+    },
+    {
         "name": "Analytics",
         "description": (
             "Aggregated document-processing analytics: classification mix, "

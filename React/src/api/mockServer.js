@@ -215,6 +215,57 @@ const DOCUMENTS = [
   },
 ]
 
+/**
+ * The analysis engines GET /settings/ai offers, matching the server's list.
+ * Availability mirrors an installation with no LLM keys configured.
+ */
+const AI_OPTIONS = [
+  {
+    id: 'auto',
+    label: 'Automatic',
+    description:
+      'Use the best configured engine: Claude, then OpenAI, then the built-in rule engine.',
+    available: true,
+    unavailable_reason: null,
+    model: null,
+  },
+  {
+    id: 'claude',
+    label: 'Claude (Anthropic)',
+    description: 'Strongest results on dense documents - contracts, statements, poor scans.',
+    available: false,
+    unavailable_reason: 'ANTHROPIC_API_KEY is not configured.',
+    model: 'claude-opus-5',
+  },
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    description: "Structured extraction via OpenAI's models.",
+    available: false,
+    unavailable_reason: 'OPENAI_API_KEY is not configured.',
+    model: 'gpt-4o-mini',
+  },
+  {
+    id: 'heuristic',
+    label: 'Built-in rule engine',
+    description: 'No third-party calls, no cost, no network. Weaker summaries and fewer fields.',
+    available: true,
+    unavailable_reason: null,
+    model: 'rules-v1',
+  },
+  {
+    id: 'none',
+    label: 'Disabled',
+    description: 'Reject analysis entirely. Uploads still store text but produce no extraction.',
+    available: true,
+    unavailable_reason: null,
+    model: null,
+  },
+]
+
+/** Mutable so a PUT in the mock actually persists for the session. */
+let aiSetting = { selected: null, updated_at: null, updated_by: null }
+
 /** Strip the heavy fields the real list endpoint does not return. */
 function toListItem(document) {
   const { extraction, events, error, ...rest } = document
@@ -460,6 +511,52 @@ export async function handleMockRequest(path, { method, body, token }) {
       daily: [...byDay.entries()]
         .sort(([a], [b]) => (a < b ? -1 : 1))
         .map(([date, entry]) => ({ date, ...entry })),
+    }
+  }
+
+  // --- Admin settings ---
+  // Mirrors GET/PUT /settings/ai. `claude` is deliberately marked unavailable so
+  // the offline UI exercises the disabled-with-a-reason branch, which is what an
+  // installation without ANTHROPIC_API_KEY actually sees.
+  if (route === '/settings/ai' && (method === 'GET' || method === 'PUT')) {
+    if (DEMO_USER.role !== 'admin') {
+      throw new ApiError('This action requires administrator privileges.', 403)
+    }
+
+    if (method === 'PUT') {
+      const provider = (body || {}).provider ?? null
+      const option = AI_OPTIONS.find((candidate) => candidate.id === provider)
+      if (provider !== null && !option) {
+        throw new ApiError(`Unknown analysis engine '${provider}'.`, 422)
+      }
+      if (option && !option.available) {
+        throw new ApiError(option.unavailable_reason, 422)
+      }
+      aiSetting = {
+        selected: provider,
+        updated_at: new Date().toISOString(),
+        updated_by: DEMO_USER.email,
+      }
+    }
+
+    const selected = aiSetting.selected
+    return {
+      selected,
+      // `auto` resolves to a concrete engine, exactly as the server reports it.
+      effective: selected === null || selected === 'auto' ? 'heuristic' : selected,
+      default: 'auto',
+      is_override: selected !== null && selected !== 'auto',
+      options: AI_OPTIONS,
+      updated_at: aiSetting.updated_at,
+      updated_by: aiSetting.updated_by,
+    }
+  }
+
+  if (route === '/settings/ai/effective' && method === 'GET') {
+    const selected = aiSetting.selected
+    return {
+      effective: selected === null || selected === 'auto' ? 'heuristic' : selected,
+      policy: selected ?? 'auto',
     }
   }
 

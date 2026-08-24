@@ -204,11 +204,11 @@ async def test_analysis_falls_back_when_the_primary_provider_fails(
     monkeypatch.setattr(
         registry,
         "get_analyzer_with_fallback",
-        lambda: (BrokenAnalyzer(), HeuristicAnalyzer()),
+        lambda policy=None: (BrokenAnalyzer(), HeuristicAnalyzer()),
     )
     monkeypatch.setattr(
         "app.services.document_processor.get_analyzer_with_fallback",
-        lambda: (BrokenAnalyzer(), HeuristicAnalyzer()),
+        lambda policy=None: (BrokenAnalyzer(), HeuristicAnalyzer()),
     )
 
     document = await upload(client, user_tokens["access_token"])
@@ -237,7 +237,7 @@ async def test_a_failing_provider_with_no_fallback_fails_the_document(
 
     monkeypatch.setattr(
         "app.services.document_processor.get_analyzer_with_fallback",
-        lambda: (BrokenAnalyzer(), None),
+        lambda policy=None: (BrokenAnalyzer(), None),
     )
 
     document = await upload(client, user_tokens["access_token"])
@@ -263,7 +263,7 @@ async def test_an_unexpected_crash_is_recorded_not_swallowed(
 
     monkeypatch.setattr(
         "app.services.document_processor.get_analyzer_with_fallback",
-        lambda: (ExplodingAnalyzer(), None),
+        lambda policy=None: (ExplodingAnalyzer(), None),
     )
 
     document = await upload(client, user_tokens["access_token"])

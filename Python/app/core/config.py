@@ -141,8 +141,14 @@ class Settings(BaseSettings):
     TEXTRACT_MAX_SYNC_BYTES: int = 5 * 1024 * 1024  # AWS sync-API hard limit
 
     # ---------------------------------------------------- ai: analysis layer
-    # auto -> OpenAI when an API key is present, else the heuristic analyzer
-    LLM_PROVIDER: Literal["auto", "openai", "heuristic", "none"] = "auto"
+    # The *default* analysis engine. An administrator can override it at runtime
+    # from the admin panel (stored in app_settings, see app.services.settings_service);
+    # this value is what a fresh installation starts on and what the override
+    # falls back to when cleared.
+    #
+    # auto -> the best configured LLM (Claude, then OpenAI), else the rule engine
+    LLM_PROVIDER: Literal["auto", "claude", "openai", "heuristic", "none"] = "auto"
+
     OPENAI_API_KEY: str | None = None
     OPENAI_MODEL: str = "gpt-4o-mini"
     OPENAI_BASE_URL: str | None = None
@@ -151,6 +157,23 @@ class Settings(BaseSettings):
     # Set to an empty value to omit `temperature` entirely - reasoning models
     # reject any value other than their default.
     OPENAI_TEMPERATURE: float | None = 0.0
+
+    # Anthropic. Supply the key the same way as any other secret: an env var in
+    # development, AWS Secrets Manager in a deployed environment.
+    ANTHROPIC_API_KEY: str | None = None
+    ANTHROPIC_MODEL: str = "claude-opus-5"
+    ANTHROPIC_BASE_URL: str | None = None
+    ANTHROPIC_TIMEOUT_SECONDS: float = 120.0
+    ANTHROPIC_MAX_RETRIES: int = 2
+    # How hard the model thinks per document. Document extraction is largely
+    # mechanical, so the API default ("high") buys little here while costing real
+    # latency on a queue. Raise it for dense contracts and poor scans.
+    ANTHROPIC_EFFORT: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    # A ceiling, not a guess: the analysis schema caps out at 25 keywords, 100
+    # entities and 100 fields, so a response that exceeds this is truncated JSON
+    # and is reported as such rather than failing to parse.
+    ANTHROPIC_MAX_OUTPUT_TOKENS: int = 8192
+
     # Guard-rail so a 300-page scan can never blow up the prompt or the bill.
     LLM_MAX_INPUT_CHARS: int = 24_000
 

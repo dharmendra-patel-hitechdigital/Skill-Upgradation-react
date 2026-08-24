@@ -15,11 +15,16 @@ const NAV = [
   { id: 'documents', label: 'Documents', icon: '▤', to: '/documents' },
   { id: 'analytics', label: 'Analytics', icon: '◔', to: '/analytics' },
   { id: 'customers', label: 'Customers', icon: '◍' },
-  { id: 'settings', label: 'Settings', icon: '⚙' },
+  // Admin-only, and hidden rather than shown-disabled: it configures the whole
+  // installation, so it is not a page a regular user is missing out on. The
+  // route enforces the role too — this only keeps the nav honest.
+  { id: 'settings', label: 'Settings', icon: '⚙', to: '/settings', adminOnly: true },
 ]
 
 export default function Sidebar({ open, onClose }) {
   const { user } = useAuth()
+  const admin = isAdmin(user)
+  const items = NAV.filter((item) => !item.adminOnly || admin)
 
   return (
     <>
@@ -30,7 +35,7 @@ export default function Sidebar({ open, onClose }) {
         </div>
 
         <nav className="sidebar__nav">
-          {NAV.map((item) =>
+          {items.map((item) =>
             item.to ? (
               <NavLink
                 key={item.id}
@@ -58,7 +63,7 @@ export default function Sidebar({ open, onClose }) {
         </nav>
 
         <div className="sidebar__footer">
-          {isAdmin(user) ? (
+          {admin ? (
             <>
               <p className="sidebar__footer-title">Administrator</p>
               <p className="sidebar__footer-text">

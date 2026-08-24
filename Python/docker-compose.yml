@@ -53,8 +53,10 @@ services:
       LOG_JSON: "true"
       STORAGE_BACKEND: local
       STORAGE_LOCAL_DIR: /app/var/documents
-      # Leave blank to run on the built-in offline AI providers. Set a key here
-      # (or in a .env file) to enable OpenAI-powered analysis.
+      # Leave both blank to run on the built-in offline AI providers. Set a key
+      # here (or in a .env file) to enable Claude- or OpenAI-powered analysis;
+      # pick which one runs from the admin panel.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       TEXTRACT_ENABLED: "${TEXTRACT_ENABLED:-false}"
       AWS_REGION: "${AWS_REGION:-us-east-1}"

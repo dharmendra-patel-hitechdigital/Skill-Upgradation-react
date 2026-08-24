@@ -26,7 +26,13 @@ python-jose[cryptography]>=3.3.0  # JWT sign/verify
 bcrypt>=4.2.0                     # password hashing
 
 # --- AI providers ---
+# Both analysis providers are optional at runtime: each adapter imports its SDK
+# lazily, so the service still starts (and the rule-based analyser still works)
+# if one is absent or unconfigured.
 openai>=1.60.0                    # document analysis + grounded Q&A
+# 1.x, not >=0.x: the 1.0 release moved onto httpx2 and dropped deprecated
+# parameters, and this adapter is written against the 1.x surface.
+anthropic>=1.0.0                  # Claude document analysis + grounded Q&A
 boto3>=1.35.0                     # AWS Textract OCR + S3 storage
 pypdf>=5.1.0                      # PDF text-layer extraction (no-credential path)
 

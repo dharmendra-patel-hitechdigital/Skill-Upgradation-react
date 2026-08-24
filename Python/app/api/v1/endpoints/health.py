@@ -16,8 +16,10 @@ from typing import Any
 
 from fastapi import APIRouter, Response, status
 
+from app.api.deps import DBSession
 from app.core.config import settings
 from app.core.database import check_database_connection
+from app.services import settings_service
 from app.services.ai.registry import describe_providers
 from app.services.task_runner import task_runner
 
@@ -56,24 +58,39 @@ async def readiness(response: Response) -> dict[str, Any]:
 
 
 @router.get("/providers", summary="Which AI providers are active")
-async def providers() -> dict[str, Any]:
+async def providers(db: DBSession) -> dict[str, Any]:
     """Report the effective AI configuration.
 
-    Answers "why did my scan fail?" and "is this analysis coming from OpenAI or
-    the built-in rule engine?" without needing shell access to the server.
-    Reports configuration only - it makes no upstream calls, so it is free to poll.
+    Answers "why did my scan fail?" and "which engine is analysing my documents?"
+    without needing shell access to the server. It makes no upstream calls, so it
+    is free to poll.
+
+    The reported `analysis` engine accounts for the administrator's runtime
+    choice, not just the deployment default - otherwise this endpoint would
+    confidently name the wrong engine the moment anyone used the settings screen.
     """
-    status_report = describe_providers()
+    override = await settings_service.get_analysis_provider(db)
+    status_report = describe_providers(override)
     return {
         "text_extraction": status_report.text_extraction,
         "analysis": status_report.analysis,
         "textract_available": status_report.textract_available,
         "openai_available": status_report.openai_available,
-        "analysis_model": (
-            settings.OPENAI_MODEL if status_report.openai_available else "rules-v1"
-        ),
+        "anthropic_available": status_report.anthropic_available,
+        # The model belonging to the engine that is actually selected, not
+        # whichever key happens to be present.
+        "analysis_model": _analysis_model(status_report.analysis),
         "storage_backend": settings.STORAGE_BACKEND,
         "max_upload_mb": settings.MAX_UPLOAD_SIZE_MB,
         "accepted_types": settings.ALLOWED_UPLOAD_TYPES,
         "notes": status_report.notes,
     }
+
+
+def _analysis_model(engine: str) -> str | None:
+    """The model name for the engine that is actually running."""
+    return {
+        "claude": settings.ANTHROPIC_MODEL,
+        "openai": settings.OPENAI_MODEL,
+        "heuristic": "rules-v1",
+    }.get(engine)

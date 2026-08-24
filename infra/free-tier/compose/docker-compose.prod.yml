@@ -26,6 +26,7 @@ services:
       DB_DIALECT: mysql
       SECRET_KEY: ${SECRET_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       # Alembic owns the schema; deploy.sh runs `alembic upgrade head` before
       # this container starts.
       AUTO_CREATE_TABLES: "false"

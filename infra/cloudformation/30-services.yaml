@@ -347,6 +347,12 @@ Resources:
                   - "${SecretArn}:OPENAI_API_KEY::"
                   - SecretArn: !ImportValue
                       Fn::Sub: "${ProjectName}-AppSecretArn"
+            - Name: ANTHROPIC_API_KEY
+              ValueFrom:
+                Fn::Sub:
+                  - "${SecretArn}:ANTHROPIC_API_KEY::"
+                  - SecretArn: !ImportValue
+                      Fn::Sub: "${ProjectName}-AppSecretArn"
           LogConfiguration:
             LogDriver: awslogs
             Options:

@@ -18,12 +18,17 @@ from functools import lru_cache
 from app.core.config import settings
 from app.core.exceptions import AIProviderUnavailableError, ExtractionError
 from app.services.ai.base import DocumentAnalyzer, TextExtractor
+from app.services.ai.claude_analyzer import ClaudeAnalyzer
 from app.services.ai.heuristic import HeuristicAnalyzer
 from app.services.ai.local_text import LocalTextExtractor
 from app.services.ai.openai_analyzer import OpenAIAnalyzer
 from app.services.ai.textract import TextractExtractor
 
 logger = logging.getLogger(__name__)
+
+# Every value ``LLM_PROVIDER`` (or its runtime override) may take. Exported so the
+# admin endpoint validates against one list rather than repeating it.
+ANALYSIS_POLICIES: tuple[str, ...] = ("auto", "claude", "openai", "heuristic", "none")
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +39,22 @@ class ProviderStatus:
     analysis: str
     textract_available: bool
     openai_available: bool
+    anthropic_available: bool
     notes: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisOption:
+    """One selectable analysis engine, as offered to the admin panel."""
+
+    id: str
+    label: str
+    description: str
+    available: bool
+    # Why it cannot be selected, or None when it can. Shown next to a disabled
+    # option so an admin is never left guessing which secret is missing.
+    unavailable_reason: str | None = None
+    model: str | None = None
 
 
 def _textract_enabled() -> bool:
@@ -49,6 +69,10 @@ def _textract_enabled() -> bool:
 
 def _openai_enabled() -> bool:
     return bool(settings.OPENAI_API_KEY and settings.OPENAI_API_KEY.strip())
+
+
+def _anthropic_enabled() -> bool:
+    return bool(settings.ANTHROPIC_API_KEY and settings.ANTHROPIC_API_KEY.strip())
 
 
 @lru_cache(maxsize=1)
@@ -78,6 +102,16 @@ def _openai_analyzer() -> OpenAIAnalyzer:
         api_key=settings.OPENAI_API_KEY,
         model=settings.OPENAI_MODEL,
         base_url=settings.OPENAI_BASE_URL,
+    )
+
+
+@lru_cache(maxsize=1)
+def _claude_analyzer() -> ClaudeAnalyzer:
+    assert settings.ANTHROPIC_API_KEY  # guarded by _anthropic_enabled()
+    return ClaudeAnalyzer(
+        api_key=settings.ANTHROPIC_API_KEY,
+        model=settings.ANTHROPIC_MODEL,
+        base_url=settings.ANTHROPIC_BASE_URL,
     )
 
 
@@ -133,54 +167,168 @@ def get_text_extractor(content_type: str) -> TextExtractor:
     )
 
 
-def get_analyzer() -> DocumentAnalyzer:
-    """Pick the stage-2 engine: OpenAI when configured, else the rule engine."""
-    policy = settings.LLM_PROVIDER
+def effective_analysis_policy(override: str | None = None) -> str:
+    """Resolve which policy applies: the runtime override, else the env default.
+
+    An unrecognised override is ignored rather than raising, so a stale row in
+    ``app_settings`` (a provider removed from a later build, say) degrades to the
+    configured default instead of failing every upload.
+    """
+    if override and override in ANALYSIS_POLICIES:
+        return override
+    if override:
+        logger.warning("unknown_analysis_policy_ignored", extra={"policy": override})
+    return settings.LLM_PROVIDER
+
+
+def get_analyzer(policy: str | None = None) -> DocumentAnalyzer:
+    """Pick the stage-2 engine.
+
+    ``policy`` is the runtime override chosen by an administrator; omit it to use
+    the configured default. Selection is explicit rather than read from a
+    process-local cache, so a change made on one replica applies to the next
+    document processed by every replica.
+    """
+    policy = effective_analysis_policy(policy)
 
     if policy == "none":
         raise AIProviderUnavailableError("Document analysis is disabled (LLM_PROVIDER=none).")
     if policy == "heuristic":
         return _heuristic_analyzer()
+    if policy == "claude":
+        if not _anthropic_enabled():
+            raise AIProviderUnavailableError(
+                "The Claude analyser is selected but ANTHROPIC_API_KEY is not set."
+            )
+        return _claude_analyzer()
     if policy == "openai":
         if not _openai_enabled():
             raise AIProviderUnavailableError(
-                "LLM_PROVIDER=openai but OPENAI_API_KEY is not set."
+                "The OpenAI analyser is selected but OPENAI_API_KEY is not set."
             )
         return _openai_analyzer()
 
-    # policy == "auto"
-    return _openai_analyzer() if _openai_enabled() else _heuristic_analyzer()
+    # policy == "auto": the most capable configured engine, else the rule engine.
+    # Claude first because it is the newer integration and the one whose model
+    # default is a current frontier model; an installation that wants the other
+    # order should say so explicitly rather than rely on this tie-break.
+    if _anthropic_enabled():
+        return _claude_analyzer()
+    if _openai_enabled():
+        return _openai_analyzer()
+    return _heuristic_analyzer()
 
 
-def get_analyzer_with_fallback() -> tuple[DocumentAnalyzer, DocumentAnalyzer | None]:
+def get_analyzer_with_fallback(
+    policy: str | None = None,
+) -> tuple[DocumentAnalyzer, DocumentAnalyzer | None]:
     """Return ``(primary, fallback)`` for the analysis stage.
 
-    Under ``auto`` with OpenAI configured, the rule-based analyser is offered as
-    a fallback. That converts an outage or an exhausted quota from "every upload
+    Whenever the primary is a paid LLM, the rule-based analyser is offered as a
+    fallback. That converts an outage or an exhausted quota from "every upload
     fails" into "documents still get processed, with a warning attached".
+
+    Previously this applied only under ``auto``; it now applies to an explicit
+    choice too. Choosing Claude or OpenAI in the admin panel is a statement about
+    which engine to *prefer*, not a request to fail the document when that engine
+    is down.
     """
-    primary = get_analyzer()
-    if settings.LLM_PROVIDER == "auto" and primary.name == "openai":
+    resolved = effective_analysis_policy(policy)
+    primary = get_analyzer(resolved)
+    if primary.name in ("claude", "openai"):
         return primary, _heuristic_analyzer()
     return primary, None
 
 
-def describe_providers() -> ProviderStatus:
+def analysis_options() -> list[AnalysisOption]:
+    """Every selectable analysis engine, with whether it can actually run.
+
+    Drives the admin panel's provider picker. Availability is derived from the
+    configured secrets, so an option is never offered that would fail on the next
+    upload - and a disabled one carries the reason.
+    """
+    anthropic_ready = _anthropic_enabled()
+    openai_ready = _openai_enabled()
+
+    return [
+        AnalysisOption(
+            id="auto",
+            label="Automatic",
+            description=(
+                "Use the best configured engine: Claude, then OpenAI, then the "
+                "built-in rule engine."
+            ),
+            available=True,
+            model=None,
+        ),
+        AnalysisOption(
+            id="claude",
+            label="Claude (Anthropic)",
+            description=(
+                "Strongest results on dense documents - contracts, statements, "
+                "poor scans."
+            ),
+            available=anthropic_ready,
+            unavailable_reason=(
+                None if anthropic_ready else "ANTHROPIC_API_KEY is not configured."
+            ),
+            model=settings.ANTHROPIC_MODEL,
+        ),
+        AnalysisOption(
+            id="openai",
+            label="OpenAI",
+            description="Structured extraction via OpenAI's models.",
+            available=openai_ready,
+            unavailable_reason=(
+                None if openai_ready else "OPENAI_API_KEY is not configured."
+            ),
+            model=settings.OPENAI_MODEL,
+        ),
+        AnalysisOption(
+            id="heuristic",
+            label="Built-in rule engine",
+            description=(
+                "No third-party calls, no cost, no network. Weaker summaries and "
+                "fewer fields."
+            ),
+            available=True,
+            model="rules-v1",
+        ),
+        AnalysisOption(
+            id="none",
+            label="Disabled",
+            description=(
+                "Reject analysis entirely. Uploads still store text but produce "
+                "no extraction."
+            ),
+            available=True,
+            model=None,
+        ),
+    ]
+
+
+def describe_providers(policy: str | None = None) -> ProviderStatus:
     """Report the effective configuration for the health endpoint."""
     notes: list[str] = []
 
     textract_ready = _textract_enabled()
     openai_ready = _openai_enabled()
+    anthropic_ready = _anthropic_enabled()
 
     if not textract_ready:
         notes.append(
             "AWS Textract is off: scanned images and photos cannot be processed. "
             "PDFs with a text layer and plain text work."
         )
-    if not openai_ready:
+    if not openai_ready and not anthropic_ready:
         notes.append(
-            "No OpenAI key configured: the built-in rule-based analyser is in use."
+            "No Anthropic or OpenAI key configured: the built-in rule-based "
+            "analyser is in use."
         )
+    elif not anthropic_ready:
+        notes.append("No Anthropic key configured, so the Claude analyser cannot be used.")
+    elif not openai_ready:
+        notes.append("No OpenAI key configured, so the OpenAI analyser cannot be used.")
     if textract_ready and not settings.S3_BUCKET:
         notes.append(
             "Textract is on but no S3 bucket is set, so PDFs larger than "
@@ -188,7 +336,7 @@ def describe_providers() -> ProviderStatus:
         )
 
     try:
-        analysis = get_analyzer().name
+        analysis = get_analyzer(policy).name
     except AIProviderUnavailableError:
         analysis = "disabled"
 
@@ -204,6 +352,7 @@ def describe_providers() -> ProviderStatus:
         analysis=analysis,
         textract_available=textract_ready,
         openai_available=openai_ready,
+        anthropic_available=anthropic_ready,
         notes=notes,
     )
 
@@ -215,5 +364,6 @@ def reset_provider_cache() -> None:
         _textract_extractor,
         _heuristic_analyzer,
         _openai_analyzer,
+        _claude_analyzer,
     ):
         factory.cache_clear()

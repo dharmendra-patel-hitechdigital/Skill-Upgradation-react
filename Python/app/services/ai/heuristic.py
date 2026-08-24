@@ -213,8 +213,9 @@ class HeuristicAnalyzer:
         language = _detect_language(body)
 
         warnings: list[str] = [
-            "Analysed by the built-in rule-based engine. Configure OPENAI_API_KEY "
-            "for higher-quality classification, summaries and field extraction."
+            "Analysed by the built-in rule-based engine. Configure "
+            "ANTHROPIC_API_KEY or OPENAI_API_KEY for higher-quality "
+            "classification, summaries and field extraction."
         ]
         if len(body.strip()) < 200:
             warnings.append("The document contained very little text.")

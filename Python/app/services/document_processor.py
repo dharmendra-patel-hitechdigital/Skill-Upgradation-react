@@ -46,6 +46,7 @@ from app.core.logging import safe_extra
 from app.models.document import DocumentStatus
 from app.repositories import document as doc_repo
 from app.schemas.document import DocumentAnalysis
+from app.services import settings_service
 from app.services.ai.base import AnalysisResult, TextExtractionResult
 from app.services.ai.registry import get_analyzer_with_fallback, get_text_extractor
 from app.services.storage import get_storage
@@ -94,6 +95,11 @@ class _Job:
     content_type: str
     storage_key: str
     size_bytes: int
+    # The analysis engine an administrator selected, resolved on the claiming
+    # session. Read per document rather than cached in the process: the admin
+    # panel change has to reach every replica, and a replica that memoised this
+    # at startup would keep using the previous engine until it restarted.
+    analysis_policy: str | None = None
 
 
 def schedule_processing(document_id: int) -> None:
@@ -204,6 +210,7 @@ async def _claim(document_id: int) -> _Job | None:
             content_type=document.content_type,
             storage_key=document.storage_key,
             size_bytes=document.size_bytes,
+            analysis_policy=await settings_service.get_analysis_provider(db),
         )
 
 
@@ -241,7 +248,7 @@ async def _analyse(job: _Job, extraction: TextExtractionResult) -> AnalysisResul
     document. The fallback's output is tagged with a warning so a consumer can
     tell a rule-based analysis from a model-generated one.
     """
-    primary, fallback = get_analyzer_with_fallback()
+    primary, fallback = get_analyzer_with_fallback(job.analysis_policy)
     text = _merge_detected_fields(extraction)
 
     try:

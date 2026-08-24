@@ -70,6 +70,7 @@ services:
       LOG_JSON: "true"
       STORAGE_BACKEND: local
       STORAGE_LOCAL_DIR: /app/var/documents
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       TEXTRACT_ENABLED: "${TEXTRACT_ENABLED:-false}"
       AWS_REGION: "${AWS_REGION:-us-east-1}"

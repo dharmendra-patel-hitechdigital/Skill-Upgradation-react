@@ -2,6 +2,7 @@
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    admin_settings,
     analytics,
     auth,
     dashboard,
@@ -17,3 +18,4 @@ api_router.include_router(users.router)
 api_router.include_router(documents.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(analytics.router)
+api_router.include_router(admin_settings.router)

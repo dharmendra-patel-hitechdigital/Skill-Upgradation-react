@@ -44,9 +44,9 @@ aws ecr get-login-password --region "$AWS_REGION" \
   | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
 # Secrets are read at deploy time from Parameter Store rather than baked into
-# the image or the compose file. OPENAI_API_KEY is optional - the API falls back
-# to its offline analyzer when it is absent, so a missing parameter must not be
-# fatal here.
+# the image or the compose file. Both AI keys are optional - the API falls back
+# to its offline analyzer when neither is present, so a missing parameter must
+# not be fatal here. Which engine runs is chosen in the admin panel, not here.
 get_param() {
   aws ssm get-parameter --region "$AWS_REGION" \
     --name "/${PROJECT_NAME}/$1" --with-decryption \
@@ -56,6 +56,7 @@ get_param() {
 DB_PASSWORD="$(get_param DB_PASSWORD)"
 SECRET_KEY="$(get_param SECRET_KEY)"
 OPENAI_API_KEY="$(get_param OPENAI_API_KEY)"
+ANTHROPIC_API_KEY="$(get_param ANTHROPIC_API_KEY)"
 
 # The database endpoint is read here, not taken from app.env. UserData writes
 # app.env once at instance launch, so its DB_HOST goes stale the moment the
@@ -100,6 +101,7 @@ DB_HOST=${DB_HOST}
 DB_PASSWORD=${DB_PASSWORD}
 SECRET_KEY=${SECRET_KEY}
 OPENAI_API_KEY=${OPENAI_API_KEY}
+ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 PUBLIC_ORIGIN=${PUBLIC_ORIGIN:-}
 EOF
 

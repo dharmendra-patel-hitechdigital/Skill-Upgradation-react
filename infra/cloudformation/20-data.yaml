@@ -72,12 +72,13 @@ Resources:
     Properties:
       Name: !Sub "${ProjectName}/app/secrets"
       Description: >
-        Application secrets. SECRET_KEY is generated; OPENAI_API_KEY is created
-        empty on purpose - fill it in with `aws secretsmanager put-secret-value`
-        (or the console) and the API falls back to its offline analyzer until
-        you do.
+        Application secrets. SECRET_KEY is generated; the two AI keys are
+        created empty on purpose - fill in whichever you use with
+        `aws secretsmanager put-secret-value` (or the console) and the API falls
+        back to its offline analyzer until you do. Which engine actually runs is
+        then chosen from the admin panel, not from here.
       GenerateSecretString:
-        SecretStringTemplate: '{"OPENAI_API_KEY":""}'
+        SecretStringTemplate: '{"OPENAI_API_KEY":"","ANTHROPIC_API_KEY":""}'
         GenerateStringKey: SECRET_KEY
         PasswordLength: 48
         ExcludePunctuation: true

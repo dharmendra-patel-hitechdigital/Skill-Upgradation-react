@@ -10,8 +10,8 @@ the point where it matters, and the trade-offs are stated rather than hidden.
 
 > **It works with no third-party credentials.** Clone, install, run. The AI
 > feature is fully functional out of the box using a built-in PDF reader and a
-> rule-based analyser. Adding an OpenAI key or AWS Textract upgrades quality and
-> adds scanned-image support — it does not switch the feature on.
+> rule-based analyser. Adding a Claude or OpenAI key, or AWS Textract, upgrades
+> quality and adds scanned-image support — it does not switch the feature on.
 
 ---
 
@@ -159,19 +159,22 @@ app/
 │       ├── base.py            Protocols: TextExtractor, DocumentAnalyzer
 │       ├── local_text.py      PDF text layer + plain text  (no credentials)
 │       ├── textract.py        AWS Textract OCR            (sync + async paths)
+│       ├── analysis_contract.py  Prompts, JSON Schema, coercion (provider-neutral)
+│       ├── claude_analyzer.py Anthropic Claude structured outputs
 │       ├── openai_analyzer.py OpenAI structured outputs
 │       ├── heuristic.py       Rule-based analyser          (no credentials)
 │       └── registry.py        Provider selection & graceful degradation
 └── api/                       HTTP layer
     ├── deps.py                Auth, pagination, ownership-scoped loaders
-    └── v1/endpoints/          auth, users, documents, dashboard, analytics, health
+    └── v1/endpoints/          auth, users, documents, dashboard, analytics,
+                               admin_settings, health
 ```
 
 **The dependency rule:** each layer depends only on the ones below it.
 `api → services → repositories → models`. Services raise *domain* errors and
 never import `fastapi.HTTPException`, so the same logic is callable from a CLI,
 a worker, or a test. The AI layer is reached only through protocols, so no
-business code imports `openai` or `boto3`.
+business code imports `openai`, `anthropic` or `boto3`.
 
 ---
 
@@ -210,7 +213,48 @@ session.
 | Stage | Preferred | Built-in fallback | Selection |
 |---|---|---|---|
 | Text extraction | AWS Textract (scans, photos, multi-page) | `pypdf` text layer + plain text | `OCR_PROVIDER` |
-| Analysis | OpenAI structured outputs | rule-based analyser | `LLM_PROVIDER` |
+| Analysis | Claude or OpenAI structured outputs | rule-based analyser | `LLM_PROVIDER`, or the admin panel |
+
+Two analysis engines ship, behind the same protocol:
+
+* **Claude** (`ANTHROPIC_API_KEY`) — structured outputs via `output_config.format`
+  with adaptive thinking, so the model decides how much to reason per document
+  rather than burning a fixed budget on every receipt.
+* **OpenAI** (`OPENAI_API_KEY`) — structured outputs with `strict: true`.
+
+They share their prompts, their JSON Schema and their coercion pass
+([`analysis_contract.py`](app/services/ai/analysis_contract.py)); each adapter
+owns only its SDK call and its error translation. Adding a document type updates
+both engines at once, which is the point — two copies of that schema would drift
+silently, and each provider's own tests would keep passing while they did.
+
+Whichever engine runs, a failure falls back to the rule-based analyser with a
+warning attached to the result, so a provider outage degrades quality instead of
+losing the document.
+
+#### Choosing the engine at runtime
+
+`LLM_PROVIDER` is the **default**. An administrator can override it without a
+redeploy from **Settings → Document analysis engine**, or over the API:
+
+```bash
+curl -X PUT $BASE/settings/ai -H "Authorization: Bearer $ADMIN_TOKEN"   -H 'Content-Type: application/json' -d '{"provider": "claude"}'
+```
+
+Three things about that override:
+
+* **API keys are never settable here.** They stay deployment secrets — an env var
+  locally, AWS Secrets Manager in a deployed environment. A key writable over
+  HTTP is a key exfiltratable over HTTP. The panel only chooses between engines
+  that are *already* configured, and offers an unconfigured one as disabled with
+  the missing variable named.
+* **It is read per document, not cached in the process.** The pipeline resolves
+  it on the session it already opens to claim the document, so a change made
+  through one replica reaches every replica's next document. A process-level
+  cache would leave other replicas on the old engine until they restarted.
+* **It applies to the next document.** Anything already in flight finishes on the
+  engine it started with, and nothing is reprocessed automatically — use the
+  reprocess action to re-run a document through the newly selected engine.
 
 Under `auto`:
 
@@ -351,6 +395,18 @@ is **document volume**, and the response carries its own `meta.title` /
 `meta.subtitle` so the chart captions itself from the server rather than from a
 hard-coded label that could contradict the numbers.
 
+### Settings (admin)
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/settings/ai` | admin | The selected engine, the engine that will actually run, and the options with availability |
+| PUT | `/settings/ai` | admin | Choose the engine; `{"provider": null}` clears the override |
+| GET | `/settings/ai/effective` | admin | Just the resolved engine name — a cheap probe for a script |
+
+Selecting an engine whose credentials are missing is rejected with **422** and
+the missing variable named, rather than accepted and then failing every
+subsequent upload. See [Choosing the engine at runtime](#choosing-the-engine-at-runtime).
+
 ### Analytics
 
 | Method | Path | Auth | Description |
@@ -450,7 +506,10 @@ Most-used settings:
 | `CORS_ORIGINS` | localhost:5173 | Comma-separated or JSON; `*` rejected in production |
 | `STORAGE_BACKEND` | `local` | `local` or `s3` |
 | `OCR_PROVIDER` | `auto` | `auto`/`local`/`textract`/`none` |
-| `LLM_PROVIDER` | `auto` | `auto`/`openai`/`heuristic`/`none` |
+| `LLM_PROVIDER` | `auto` | `auto`/`claude`/`openai`/`heuristic`/`none` — the *default*; an admin can override it at runtime |
+| `ANTHROPIC_API_KEY` | — | Set to enable Claude analysis |
+| `ANTHROPIC_MODEL` | `claude-opus-5` | Model used by the Claude analyser |
+| `ANTHROPIC_EFFORT` | `medium` | Thinking depth: `low`…`max` |
 | `OPENAI_API_KEY` | — | Set to enable OpenAI analysis |
 | `TEXTRACT_ENABLED` | `false` | Set to enable OCR for scanned images |
 | `MAX_UPLOAD_SIZE_MB` | `20` | Enforced on bytes received, not `Content-Length` |
@@ -604,7 +663,46 @@ The image is a two-stage build (compilers never reach the runtime layer), runs a
 a **non-root** user, and its `HEALTHCHECK` hits `/health/ready` so an unreachable
 database marks the container unhealthy rather than merely "running".
 
-To use OpenAI in compose, export the key first: `export OPENAI_API_KEY=sk-...`
+To use a paid analyser in compose, export its key before `docker compose up`:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...     # Claude
+export OPENAI_API_KEY=sk-...            # OpenAI
+```
+
+### Where each AI key goes
+
+The application only ever reads `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` from its
+environment; nothing writes them. Each deployment path supplies them differently:
+
+| Where | How |
+|---|---|
+| Local (uvicorn) | `Python/.env` — git-ignored |
+| Local (compose) | `export ANTHROPIC_API_KEY=…` before `docker compose up`, or the root `.env` |
+| ECS (`infra/cloudformation`) | AWS Secrets Manager, key `ANTHROPIC_API_KEY` inside the `${ProjectName}/app/secrets` secret; the task definition injects it |
+| EC2 free tier (`infra/free-tier`) | SSM Parameter Store, `/${PROJECT_NAME}/ANTHROPIC_API_KEY` (SecureString); `deploy.sh` reads it at deploy time |
+
+Adding the key to an existing ECS stack, without a redeploy of the template:
+
+```bash
+aws secretsmanager put-secret-value \
+  --secret-id "${PROJECT_NAME}/app/secrets" \
+  --secret-string "$(aws secretsmanager get-secret-value \
+      --secret-id "${PROJECT_NAME}/app/secrets" --query SecretString --output text \
+    | jq --arg k "sk-ant-..." '.ANTHROPIC_API_KEY = $k')"
+aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --force-new-deployment
+```
+
+Or for the free-tier instance:
+
+```bash
+aws ssm put-parameter --name "/${PROJECT_NAME}/ANTHROPIC_API_KEY" \
+  --value "sk-ant-..." --type SecureString --overwrite
+```
+
+Secrets are read when the container starts, so a key added after the fact needs a
+new deployment (or a restart) before the app sees it. Once it does, Claude
+becomes selectable in **Settings → Document analysis engine**.
 
 ---
 
