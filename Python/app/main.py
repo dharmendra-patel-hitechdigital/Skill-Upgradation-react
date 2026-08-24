@@ -109,6 +109,15 @@ TAGS_METADATA: list[dict[str, Any]] = [
         ),
     },
     {
+        "name": "Analytics",
+        "description": (
+            "Aggregated document-processing analytics: classification mix, "
+            "failure breakdown, pipeline latency, provider usage and token "
+            "totals. Scoped to the caller's own documents, or the whole "
+            "installation for an admin."
+        ),
+    },
+    {
         "name": "Dashboard",
         "description": (
             "Aggregated summary panels: headline stats, a monthly volume "

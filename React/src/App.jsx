@@ -6,6 +6,7 @@ import Register from './pages/Register.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import Documents from './pages/Documents.jsx'
 import DocumentDetail from './pages/DocumentDetail.jsx'
+import Analytics from './pages/Analytics.jsx'
 import NotFound from './pages/NotFound.jsx'
 import Spinner from './components/ui/Spinner.jsx'
 
@@ -48,6 +49,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <DocumentDetail />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/analytics"
+        element={
+          <ProtectedRoute>
+            <Analytics />
           </ProtectedRoute>
         }
       />

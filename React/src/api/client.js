@@ -34,35 +34,60 @@ export function setToken(token) {
 
 /**
  * @param {string} path   e.g. "/auth/login"
- * @param {object} [opts] { method, body, headers, signal, form }
+ * @param {object} [opts] { method, body, headers, signal, form, withStatus }
  *
  * `form: true` sends the body as application/x-www-form-urlencoded instead of
  * JSON. Only /auth/login needs it: the backend implements the OAuth2 password
  * flow via FastAPI's OAuth2PasswordRequestForm, which reads form fields and
  * rejects a JSON payload with 422 "field required".
+ *
+ * A `FormData` body is passed through untouched and **without** a Content-Type
+ * header — the browser has to set it itself, because only it knows the multipart
+ * boundary it generated. Setting `multipart/form-data` by hand omits the
+ * boundary and the server rejects the request as malformed.
+ *
+ * `withStatus: true` resolves to `{ status, data }` instead of just the body.
+ * Needed where a success code carries meaning: the upload endpoint answers
+ * **202** for "accepted, now processing" and **200** for "this exact file was
+ * already uploaded, here is the original", and those want different messages.
  */
 export async function request(
   path,
-  { method = 'GET', body, headers = {}, signal, form = false } = {},
+  { method = 'GET', body, headers = {}, signal, form = false, withStatus = false } = {},
 ) {
   const token = getToken()
+  const isMultipart = typeof FormData !== 'undefined' && body instanceof FormData
+
   const finalHeaders = {
-    'Content-Type': form ? 'application/x-www-form-urlencoded' : 'application/json',
+    ...(isMultipart
+      ? {}
+      : { 'Content-Type': form ? 'application/x-www-form-urlencoded' : 'application/json' }),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...headers,
   }
 
   // Route to the in-memory mock backend when no real API is configured.
   if (isMockEnabled(BASE_URL)) {
-    return handleMockRequest(path, { method, body, token })
+    const result = await handleMockRequest(path, { method, body, token })
+    // The mock signals a dedup hit the same way the real API does, so the
+    // caller's branching is identical in both modes.
+    return withStatus
+      ? { status: result?.__status ?? 200, data: stripInternal(result) }
+      : stripInternal(result)
   }
+
+  let requestBody
+  if (body === undefined || body === null) requestBody = undefined
+  else if (isMultipart) requestBody = body
+  else if (form) requestBody = new URLSearchParams(body).toString()
+  else requestBody = JSON.stringify(body)
 
   let res
   try {
     res = await fetch(`${BASE_URL}${path}`, {
       method,
       headers: finalHeaders,
-      body: body ? (form ? new URLSearchParams(body).toString() : JSON.stringify(body)) : undefined,
+      body: requestBody,
       signal,
     })
   } catch (err) {
@@ -86,13 +111,24 @@ export async function request(
     throw new ApiError(message, res.status, data)
   }
 
-  return data
+  return withStatus ? { status: res.status, data } : data
+}
+
+/** Remove the mock backend's status marker so callers never see it. */
+function stripInternal(result) {
+  if (!result || typeof result !== 'object' || !('__status' in result)) return result
+  const { __status, ...rest } = result
+  return rest
 }
 
 export const api = {
   get: (path, opts) => request(path, { ...opts, method: 'GET' }),
   post: (path, body, opts) => request(path, { ...opts, method: 'POST', body }),
   postForm: (path, body, opts) => request(path, { ...opts, method: 'POST', body, form: true }),
+  // `formData` must be a FormData instance; request() detects it and lets the
+  // browser set the multipart Content-Type with its boundary.
+  upload: (path, formData, opts) =>
+    request(path, { ...opts, method: 'POST', body: formData, withStatus: true }),
   put: (path, body, opts) => request(path, { ...opts, method: 'PUT', body }),
   del: (path, opts) => request(path, { ...opts, method: 'DELETE' }),
 }

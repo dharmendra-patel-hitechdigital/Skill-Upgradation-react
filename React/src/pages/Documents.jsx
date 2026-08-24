@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth.js'
 import { useApi } from '../hooks/useApi.js'
 import { useDocumentTitle } from '../hooks/useDocumentTitle.js'
-import { fetchDocuments } from '../api/documents.api.js'
+import {
+  DOCUMENT_STATUSES,
+  DOCUMENT_TYPES,
+  fetchDocuments,
+  fetchUploadLimits,
+} from '../api/documents.api.js'
 import { isAdmin } from '../lib/roles.js'
 import Sidebar from '../components/layout/Sidebar.jsx'
 import Topbar from '../components/layout/Topbar.jsx'
 import DocumentToolbar from '../components/documents/DocumentToolbar.jsx'
 import DocumentTable from '../components/documents/DocumentTable.jsx'
+import UploadDropzone from '../components/documents/UploadDropzone.jsx'
 import Card from '../components/ui/Card.jsx'
 import Button from '../components/ui/Button.jsx'
 import Spinner from '../components/ui/Spinner.jsx'
@@ -26,14 +33,38 @@ const EMPTY_FILTERS = {
 /** Free-text inputs debounce; selects apply immediately. */
 const TEXT_DEBOUNCE_MS = 350
 
+/**
+ * Seed the filters from the URL, so the analytics page can deep-link into a
+ * filtered list ("show me the failed documents", "show me this user's uploads").
+ *
+ * `status` and `type` are validated against the enums the API accepts: an
+ * unknown value in a hand-edited URL would otherwise be forwarded and come back
+ * as a 422 that looks like a bug in the page.
+ */
+function filtersFromUrl(params) {
+  const status = params.get('status') ?? ''
+  const documentType = params.get('type') ?? ''
+  return {
+    ...EMPTY_FILTERS,
+    status: DOCUMENT_STATUSES.includes(status) ? status : '',
+    documentType: DOCUMENT_TYPES.includes(documentType) ? documentType : '',
+    search: params.get('q') ?? '',
+    ownerEmail: params.get('owner') ?? '',
+  }
+}
+
 export default function Documents() {
   useDocumentTitle('Documents · Hitech')
   const { user } = useAuth()
   const admin = isAdmin(user)
 
+  const [searchParams] = useSearchParams()
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [draft, setDraft] = useState(EMPTY_FILTERS)
-  const [applied, setApplied] = useState(EMPTY_FILTERS)
+  const [uploadOpen, setUploadOpen] = useState(false)
+  // Read once, on mount: after that the controls own the state, so editing a
+  // filter must not be undone by the stale URL it was opened with.
+  const [draft, setDraft] = useState(() => filtersFromUrl(searchParams))
+  const [applied, setApplied] = useState(() => filtersFromUrl(searchParams))
   const [page, setPage] = useState(1)
 
   // Debounce only what is typed. Without this, every keystroke in the filename
@@ -66,8 +97,19 @@ export default function Documents() {
     deps: [query],
   })
 
+  // Fetched once, not per render: the accepted types and size cap are server
+  // configuration, so the picker enforces what the server actually enforces.
+  const limits = useApi(({ signal }) => fetchUploadLimits({ signal }))
+
   const items = documents.data?.items ?? []
   const meta = documents.data?.meta ?? null
+
+  /** After an upload, show the newest row rather than whatever page/filter was set. */
+  function showNewest() {
+    setDraft(EMPTY_FILTERS)
+    setPage(1)
+    documents.refetch().catch(() => {})
+  }
 
   return (
     <div className="layout">
@@ -86,7 +128,17 @@ export default function Documents() {
                   : 'Every document you have uploaded, with its extraction results.'}
               </p>
             </div>
+            <Button onClick={() => setUploadOpen((open) => !open)}>
+              {uploadOpen ? 'Close' : '⬆ Upload document'}
+            </Button>
           </div>
+
+          {uploadOpen && (
+            <Card className="panel">
+              <h3 className="panel__title">Upload documents</h3>
+              <UploadDropzone limits={limits.data} onUploaded={showNewest} />
+            </Card>
+          )}
 
           {documents.error && (
             <Card className="content__error">

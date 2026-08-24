@@ -79,6 +79,43 @@ export async function fetchDocuments(filters = {}, opts) {
   return { items: data.items ?? [], meta: data.meta ?? null }
 }
 
+/**
+ * POST /documents — multipart upload, field name `file`.
+ *
+ * Resolves to `{ document, deduplicated }`:
+ *
+ * * **202** — accepted. The record comes back as `pending`; extraction runs in
+ *   the background, so the caller must poll (the detail page does).
+ * * **200** — this exact file, byte for byte, was already uploaded by this user.
+ *   The *original* record is returned and nothing is reprocessed. Worth telling
+ *   the user about: otherwise re-uploading looks like it silently did nothing.
+ *
+ * @param {File} file
+ */
+export async function uploadDocument(file, opts) {
+  const formData = new FormData()
+  // The field name is fixed by the endpoint's `file: UploadFile = File(...)`.
+  formData.append('file', file, file.name)
+
+  const { status, data } = await api.upload('/documents', formData, opts)
+  return { document: data, deduplicated: status === 200 }
+}
+
+/**
+ * GET /health/providers -> the effective upload limits and active AI engines.
+ *
+ * Read for `max_upload_mb` / `accepted_types` so the picker enforces the same
+ * limits the server does. Hard-coding them client-side means a server config
+ * change silently turns a friendly "too large" into a raw 413.
+ */
+export async function fetchUploadLimits(opts) {
+  const data = await api.get('/health/providers', opts)
+  return {
+    maxUploadMb: data.max_upload_mb ?? null,
+    acceptedTypes: data.accepted_types ?? [],
+  }
+}
+
 /** GET /documents/stats -> { [status]: count } */
 export function fetchDocumentStats(opts) {
   return api.get('/documents/stats', opts)

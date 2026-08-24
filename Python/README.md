@@ -164,7 +164,7 @@ app/
 │       └── registry.py        Provider selection & graceful degradation
 └── api/                       HTTP layer
     ├── deps.py                Auth, pagination, ownership-scoped loaders
-    └── v1/endpoints/          auth, users, documents, dashboard, health
+    └── v1/endpoints/          auth, users, documents, dashboard, analytics, health
 ```
 
 **The dependency rule:** each layer depends only on the ones below it.
@@ -350,6 +350,35 @@ bundle. This service stores no financial data, so the series behind that panel
 is **document volume**, and the response carries its own `meta.title` /
 `meta.subtitle` so the chart captions itself from the server rather than from a
 hard-coded label that could contradict the numbers.
+
+### Analytics
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/analytics/documents` | ✔ | Processing analytics for a trailing window (`?window_days=`, default 30, max 365) |
+
+Where the dashboard answers *"what is happening right now"*, this answers *"where
+is the pipeline spending time, and what is it getting wrong"*. One response
+carries: totals and success rate; the classification mix with mean confidence per
+type; **failures grouped by error code** (usually the only panel that implies an
+action); pipeline latency as p50/p95 rather than a mean one 40-page scan can
+dominate; which engine actually ran per stage; token totals; a confidence
+histogram; the busiest uploaders (admins only); and per-day throughput.
+
+Two things worth knowing about the numbers:
+
+* **Pipeline time, not wall clock.** Latency is `ocr_duration_ms +
+  analysis_duration_ms` — the work actually done. Wall clock would include time
+  the document spent queued behind other uploads, which describes concurrency
+  rather than the document.
+* **Percentiles are nearest-rank, by `OFFSET`.** `PERCENTILE_CONT` exists on
+  neither SQLite nor MySQL 8, and loading every duration into the app to sort it
+  does not scale. Counting and then seeking to the nth row does.
+
+Scope follows the caller's role exactly as the document list does — admins see
+the installation, everyone else sees their own uploads, and `scope` in the
+response says which. No schema change was needed: every figure comes from a
+column the pipeline already persists.
 
 ### Health
 

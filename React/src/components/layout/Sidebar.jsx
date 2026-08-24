@@ -13,7 +13,7 @@ import { isAdmin } from '../../lib/roles.js'
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: '◧', to: '/dashboard' },
   { id: 'documents', label: 'Documents', icon: '▤', to: '/documents' },
-  { id: 'analytics', label: 'Analytics', icon: '◔' },
+  { id: 'analytics', label: 'Analytics', icon: '◔', to: '/analytics' },
   { id: 'customers', label: 'Customers', icon: '◍' },
   { id: 'settings', label: 'Settings', icon: '⚙' },
 ]

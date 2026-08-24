@@ -1,4 +1,5 @@
 import Card from '../ui/Card.jsx'
+import ShareBar from '../analytics/ShareBar.jsx'
 import {
   formatConfidence,
   formatDuration,
@@ -132,6 +133,17 @@ export default function ExtractionDetails({ extraction }) {
         {/* Provenance, not decoration: "why is this summary poor?" is usually
             answered by which engine actually ran, and the token counts are what
             a spend question comes down to. */}
+        {(ocrMs != null || analysisMs != null) && (
+          <div className="timing-split">
+            <ShareBar
+              formatValue={(value) => formatDuration(value)}
+              segments={[
+                { label: 'Text extraction', value: ocrMs ?? 0, tone: 'violet' },
+                { label: 'Analysis', value: analysisMs ?? 0, tone: 'blue' },
+              ]}
+            />
+          </div>
+        )}
         <dl className="kv">
           <div className="kv__item">
             <dt>Text extraction</dt>

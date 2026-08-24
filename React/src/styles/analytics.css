@@ -1,0 +1,99 @@
+/* ============================================================================
+   Analytics: metric tiles, share bars, mini bars, daily throughput.
+   Loaded after documents.css (see main.jsx) and reuses its palette tokens.
+   ========================================================================= */
+
+/* ------------------------------------------------------------- metric tiles */
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.tile { display: flex; flex-direction: column; gap: 6px; padding: 18px; }
+.tile--warn { border-color: #fcd34d; background: var(--amber-bg); }
+.tile__label { font-size: 12.5px; font-weight: 600; color: var(--text-muted); }
+.tile__value { font-size: 25px; font-weight: 700; letter-spacing: -0.4px; }
+.tile__unit { margin-left: 3px; font-size: 15px; font-weight: 600; color: var(--text-muted); }
+.tile__hint { font-size: 12px; color: var(--text-muted); }
+.tile--warn .tile__label,
+.tile--warn .tile__hint { color: var(--amber); }
+
+/* ---------------------------------------------------------------- share bar */
+.sharebar__track {
+  display: flex; height: 14px; border-radius: 999px; overflow: hidden;
+  background: var(--slate-bg);
+}
+.sharebar__seg { height: 100%; }
+.sharebar__empty { width: 100%; background: var(--slate-bg); }
+.sharebar__seg--green { background: var(--green); }
+.sharebar__seg--red { background: var(--red); }
+.sharebar__seg--blue { background: var(--blue); }
+.sharebar__seg--violet { background: var(--violet); }
+
+.sharebar__legend {
+  list-style: none; margin: 14px 0 0; padding: 0;
+  display: flex; flex-wrap: wrap; gap: 8px 22px;
+}
+.sharebar__key {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 13px; color: var(--text-muted);
+}
+.sharebar__key strong { color: var(--text); font-weight: 650; }
+.sharebar__pct { font-size: 12px; }
+.sharebar__dot {
+  display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  flex: 0 0 auto;
+}
+.sharebar__dot--green { background: var(--green); }
+.sharebar__dot--red { background: var(--red); }
+.sharebar__dot--blue { background: var(--blue); }
+.sharebar__dot--violet { background: var(--violet); }
+
+/* ----------------------------------------------------------- in-table bars */
+.table__bar-cell { min-width: 110px; }
+.minibar {
+  display: block; width: 100%; max-width: 160px; height: 7px;
+  border-radius: 999px; background: var(--slate-bg); overflow: hidden;
+}
+.minibar__fill { display: block; height: 100%; background: var(--brand-500); }
+
+/* ----------------------------------------------------------- daily throughput */
+.daybars {
+  display: flex; align-items: flex-end; gap: 3px;
+  height: 170px; padding-top: 8px; overflow-x: auto;
+}
+.daybars__col {
+  flex: 1 1 0; min-width: 10px;
+  display: flex; flex-direction: column; align-items: center;
+  height: 100%;
+}
+/* The stack is bottom-anchored and sized as a share of the tallest day, so bar
+   heights are comparable across the window. */
+.daybars__stack {
+  width: 100%; max-width: 26px; min-height: 2px;
+  display: flex; flex-direction: column; justify-content: flex-end;
+  margin-top: auto; border-radius: 4px; overflow: hidden;
+}
+.daybars__seg { width: 100%; flex-grow: 0; flex-shrink: 0; min-height: 2px; }
+.daybars__seg--done { background: var(--green); }
+.daybars__seg--failed { background: var(--red); }
+.daybars__seg--progress { background: var(--blue); }
+.daybars__label {
+  margin-top: 8px; font-size: 10.5px; color: var(--text-muted);
+  white-space: nowrap; height: 14px;
+}
+.daybars__legend {
+  display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 12px;
+  font-size: 12.5px; color: var(--text-muted);
+}
+.daybars__legend span { display: flex; align-items: center; gap: 7px; }
+
+/* The same share bar reused on a single document's detail page, where it shows
+   that one document's split between extraction and analysis. */
+.timing-split { margin-bottom: 18px; }
+
+@media (max-width: 560px) {
+  .tile-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tile__value { font-size: 21px; }
+}

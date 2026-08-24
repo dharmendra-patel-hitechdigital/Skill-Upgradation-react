@@ -296,6 +296,290 @@ export async function handleMockRequest(path, { method, body, token }) {
   const [route, rawQuery] = path.split('?')
   const query = new URLSearchParams(rawQuery ?? '')
 
+  // Derived from the DOCUMENTS fixture rather than hard-coded, so the analytics
+  // page and the document list can never disagree offline — and reprocessing or
+  // uploading in the mock moves these numbers too.
+  if (route === '/analytics/documents' && method === 'GET') {
+    const windowDays = Number(query.get('window_days') ?? 30)
+    const docs = DOCUMENTS
+    const completed = docs.filter((d) => d.status === 'completed')
+    const failed = docs.filter((d) => d.status === 'failed')
+    const inProgress = docs.filter((d) => d.status === 'pending' || d.status === 'processing')
+    const finished = completed.length + failed.length
+    const share = (part, whole) => (whole > 0 ? Math.round((part / whole) * 1000) / 10 : 0)
+
+    const types = new Map()
+    for (const doc of docs) {
+      const key = doc.document_type ?? 'unclassified'
+      const entry = types.get(key) ?? { documents: 0, failed: 0, confidences: [], pages: [] }
+      entry.documents += 1
+      if (doc.status === 'failed') entry.failed += 1
+      if (doc.extraction?.confidence != null) entry.confidences.push(doc.extraction.confidence)
+      if (doc.page_count != null) entry.pages.push(doc.page_count)
+      types.set(key, entry)
+    }
+    const mean = (values) =>
+      values.length === 0 ? null : values.reduce((a, b) => a + b, 0) / values.length
+
+    const withExtraction = docs.filter((d) => d.extraction)
+    const pipelineTimes = withExtraction
+      .map((d) => (d.extraction.ocr_duration_ms ?? 0) + (d.extraction.analysis_duration_ms ?? 0))
+      .sort((a, b) => a - b)
+    const nth = (fraction) =>
+      pipelineTimes.length === 0
+        ? null
+        : pipelineTimes[Math.min(pipelineTimes.length - 1, Math.floor(pipelineTimes.length * fraction))]
+
+    const providerRows = []
+    for (const [stage, key] of [
+      ['text_extraction', 'ocr_provider'],
+      ['analysis', 'analysis_provider'],
+    ]) {
+      const counts = new Map()
+      for (const doc of withExtraction) {
+        const name = doc.extraction[key]
+        counts.set(name, (counts.get(name) ?? 0) + 1)
+      }
+      for (const [provider, documents] of counts) {
+        providerRows.push({
+          stage,
+          provider,
+          documents,
+          share: share(documents, withExtraction.length),
+        })
+      }
+    }
+
+    const bands = [
+      ['Very low (<50%)', 0, 0.5],
+      ['Low (50-70%)', 0.5, 0.7],
+      ['Fair (70-85%)', 0.7, 0.85],
+      ['High (85%+)', 0.85, 1.01],
+    ]
+
+    const byDay = new Map()
+    for (const doc of docs) {
+      const day = doc.created_at.slice(0, 10)
+      const entry = byDay.get(day) ?? { documents: 0, completed: 0, failed: 0 }
+      entry.documents += 1
+      if (doc.status === 'completed') entry.completed += 1
+      if (doc.status === 'failed') entry.failed += 1
+      byDay.set(day, entry)
+    }
+
+    const uploaders = new Map()
+    for (const doc of docs) {
+      const entry = uploaders.get(doc.owner.id) ?? { owner: doc.owner, documents: 0, failed: 0 }
+      entry.documents += 1
+      if (doc.status === 'failed') entry.failed += 1
+      uploaders.set(doc.owner.id, entry)
+    }
+
+    return {
+      window_days: windowDays,
+      generated_at: new Date().toISOString(),
+      scope: DEMO_USER.role === 'admin' ? 'installation' : 'own',
+      totals: {
+        documents: docs.length,
+        completed: completed.length,
+        failed: failed.length,
+        in_progress: inProgress.length,
+        success_rate: share(completed.length, finished),
+        pages: docs.reduce((sum, d) => sum + (d.page_count ?? 0), 0),
+        size_bytes: docs.reduce((sum, d) => sum + d.size_bytes, 0),
+        reprocessed: docs.filter((d) => d.attempt_count > 1).length,
+      },
+      by_type: [...types.entries()]
+        .map(([document_type, entry]) => ({
+          document_type,
+          documents: entry.documents,
+          share: share(entry.documents, docs.length),
+          failed: entry.failed,
+          avg_confidence: mean(entry.confidences),
+          avg_pages: mean(entry.pages),
+        }))
+        .sort((a, b) => b.documents - a.documents),
+      failures: [
+        ...failed
+          .reduce((map, doc) => {
+            const code = doc.error?.code ?? 'unknown'
+            const entry = map.get(code) ?? { documents: 0, example_message: doc.error?.message }
+            entry.documents += 1
+            map.set(code, entry)
+            return map
+          }, new Map())
+          .entries(),
+      ].map(([code, entry]) => ({
+        code,
+        documents: entry.documents,
+        share: share(entry.documents, failed.length),
+        example_message: entry.example_message,
+        latest_at: new Date().toISOString(),
+      })),
+      performance: {
+        samples: withExtraction.length,
+        avg_ocr_ms: mean(withExtraction.map((d) => d.extraction.ocr_duration_ms ?? 0)),
+        avg_analysis_ms: mean(withExtraction.map((d) => d.extraction.analysis_duration_ms ?? 0)),
+        avg_total_ms: mean(pipelineTimes),
+        p50_total_ms: nth(0.5),
+        p95_total_ms: nth(0.95),
+        slowest_total_ms: pipelineTimes.at(-1) ?? null,
+        avg_ms_per_page: mean(
+          withExtraction.map(
+            (d) =>
+              ((d.extraction.ocr_duration_ms ?? 0) + (d.extraction.analysis_duration_ms ?? 0)) /
+              (d.extraction.page_count || 1),
+          ),
+        ),
+      },
+      providers: providerRows,
+      tokens: {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        documents_with_tokens: 0,
+      },
+      confidence: bands.map(([label, low, high]) => {
+        const documents = withExtraction.filter(
+          (d) => d.extraction.confidence >= low && d.extraction.confidence < high,
+        ).length
+        return { label, documents, share: share(documents, withExtraction.length) }
+      }),
+      top_uploaders:
+        DEMO_USER.role === 'admin'
+          ? [...uploaders.values()]
+              .sort((a, b) => b.documents - a.documents)
+              .map((entry) => ({
+                id: entry.owner.id,
+                email: entry.owner.email,
+                full_name: entry.owner.full_name ?? null,
+                documents: entry.documents,
+                failed: entry.failed,
+              }))
+          : [],
+      daily: [...byDay.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([date, entry]) => ({ date, ...entry })),
+    }
+  }
+
+  // Mirrors the real /health/providers fields the upload picker reads.
+  if (route === '/health/providers' && method === 'GET') {
+    return {
+      text_extraction: 'local',
+      analysis: 'heuristic',
+      analysis_model: 'rules-v1',
+      storage_backend: 'local',
+      max_upload_mb: 20,
+      accepted_types: [
+        'application/pdf',
+        'image/png',
+        'image/jpeg',
+        'image/tiff',
+        'text/plain',
+      ],
+      notes: [],
+    }
+  }
+
+  if (route === '/documents' && method === 'POST') {
+    // The real endpoint takes multipart with a `file` field; client.js passes
+    // the FormData straight through, so that is what arrives here.
+    const file = body instanceof FormData ? body.get('file') : null
+    if (!file) throw new ApiError('No file was uploaded.', 422)
+    if (file.size === 0) throw new ApiError('The uploaded file is empty.', 422)
+    if (file.size > 20 * 1024 * 1024) {
+      throw new ApiError('File exceeds the 20 MB limit.', 413)
+    }
+
+    // Deduplication is per user and byte-exact server-side. Name plus size is
+    // the closest stand-in without hashing, and it exercises the 200 branch.
+    const duplicate = DOCUMENTS.find(
+      (candidate) =>
+        candidate.filename === file.name &&
+        candidate.size_bytes === file.size &&
+        candidate.owner.id === DEMO_USER.id,
+    )
+    if (duplicate) return { ...duplicate, __status: 200 }
+
+    const now = new Date().toISOString()
+    const created = {
+      id: Math.max(0, ...DOCUMENTS.map((d) => d.id)) + 1,
+      filename: file.name,
+      content_type: file.type || 'application/octet-stream',
+      size_bytes: file.size,
+      checksum_sha256: 'mock'.padEnd(64, '0'),
+      status: 'pending',
+      document_type: null,
+      page_count: null,
+      attempt_count: 0,
+      processing_duration_ms: null,
+      created_at: now,
+      updated_at: now,
+      owner: DEMO_USER,
+      error: null,
+      extraction: null,
+      events: [
+        {
+          event: 'uploaded',
+          message: `Received ${file.size} bytes as ${file.type || 'unknown'}.`,
+          created_at: now,
+        },
+      ],
+    }
+    DOCUMENTS.unshift(created)
+
+    // The real pipeline finishes asynchronously, so the fixture does too — this
+    // is what makes the detail page's polling and the status badge observable
+    // offline instead of jumping straight to `completed`.
+    setTimeout(() => {
+      created.status = 'processing'
+      created.updated_at = new Date().toISOString()
+      created.events.push({
+        event: 'processing_started',
+        message: 'Pipeline claimed the document.',
+        created_at: created.updated_at,
+      })
+    }, 2000)
+
+    setTimeout(() => {
+      created.status = 'completed'
+      created.document_type = 'other'
+      created.page_count = 1
+      created.processing_duration_ms = 4200
+      created.updated_at = new Date().toISOString()
+      created.extraction = {
+        document_type: 'other',
+        language: 'en',
+        summary:
+          'Mock extraction. Point VITE_API_BASE_URL at the real API to see a ' +
+          'genuine summary, entities and fields for this file.',
+        confidence: 0.51,
+        keywords: ['mock', 'offline'],
+        entities: [],
+        fields: [{ key: 'source', value: 'mock backend', confidence: 1 }],
+        warnings: ['This result was produced by the offline mock, not the AI pipeline.'],
+        text_preview: `(no text extracted offline for ${created.filename})`,
+        text_char_count: 0,
+        page_count: 1,
+        ocr_provider: 'local',
+        ocr_duration_ms: 120,
+        analysis_provider: 'heuristic',
+        analysis_model: 'rules-v1',
+        analysis_duration_ms: 4080,
+        prompt_tokens: null,
+        completion_tokens: null,
+      }
+      created.events.push({
+        event: 'processing_completed',
+        message: 'Mock pipeline finished.',
+        created_at: created.updated_at,
+      })
+    }, 6000)
+
+    return { ...created, __status: 202 }
+  }
+
   if (route === '/documents' && method === 'GET') {
     let matches = DOCUMENTS.slice()
 

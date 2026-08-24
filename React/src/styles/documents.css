@@ -163,6 +163,45 @@
 
 .sidebar__link--disabled { opacity: 0.45; cursor: not-allowed; }
 
+/* -------------------------------------------------------------------- upload */
+.dropzone {
+  position: relative;
+  border: 2px dashed var(--border); border-radius: var(--radius);
+  background: var(--bg); padding: 28px 20px; text-align: center;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.dropzone--active { border-color: var(--brand-500); background: var(--brand-50); }
+.dropzone--busy { opacity: 0.75; }
+
+/* The input covers the whole zone so a click anywhere opens the picker, and a
+   real <input type="file"> stays in the DOM for keyboard and screen-reader use
+   rather than being replaced by a div. */
+.dropzone__input {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; cursor: pointer;
+}
+.dropzone--busy .dropzone__input { cursor: progress; }
+
+.dropzone__body {
+  position: relative; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+/* Re-enable clicks on the button itself; the body above is click-through so the
+   file input underneath receives them. */
+.dropzone__body .btn { pointer-events: auto; }
+.dropzone__icon { font-size: 22px; color: var(--brand-600); }
+.dropzone__title { margin: 0; font-size: 14.5px; font-weight: 600; }
+.dropzone__hint { margin: 0; font-size: 12.5px; color: var(--text-muted); }
+
+.upload__results { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 8px; }
+.upload__result {
+  padding: 10px 14px; border-radius: var(--radius-sm);
+  font-size: 13.5px; border: 1px solid transparent;
+}
+.upload__result--success { color: var(--green); background: var(--green-bg); border-color: #a7f3d0; }
+.upload__result--info { color: var(--brand-700); background: var(--brand-50); border-color: var(--brand-100); }
+.upload__result--error { color: var(--red); background: var(--red-bg); border-color: #fecaca; }
+
 @media (max-width: 900px) {
   .kv { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
