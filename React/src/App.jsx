@@ -4,6 +4,8 @@ import ProtectedRoute from './components/layout/ProtectedRoute.jsx'
 import Login from './pages/Login.jsx'
 import Register from './pages/Register.jsx'
 import Dashboard from './pages/Dashboard.jsx'
+import Documents from './pages/Documents.jsx'
+import DocumentDetail from './pages/DocumentDetail.jsx'
 import NotFound from './pages/NotFound.jsx'
 import Spinner from './components/ui/Spinner.jsx'
 
@@ -28,6 +30,24 @@ export default function App() {
         element={
           <ProtectedRoute>
             <Dashboard />
+          </ProtectedRoute>
+        }
+      />
+      {/* Both roles use these: the server returns the caller's own documents,
+          or every user's when the caller is an administrator. */}
+      <Route
+        path="/documents"
+        element={
+          <ProtectedRoute>
+            <Documents />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/documents/:id"
+        element={
+          <ProtectedRoute>
+            <DocumentDetail />
           </ProtectedRoute>
         }
       />

@@ -16,7 +16,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.models.document import DocumentStatus
 
@@ -167,6 +167,22 @@ class DocumentError(BaseModel):
     message: str
 
 
+class DocumentOwner(BaseModel):
+    """Who uploaded a document.
+
+    Always returned, for both roles. That leaks nothing: a regular user only
+    ever receives their *own* documents, so this is their own identity echoed
+    back - while an administrator listing the whole installation genuinely
+    cannot use the list without it.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: EmailStr
+    full_name: str | None = None
+
+
 class DocumentRead(BaseModel):
     """List-view representation: metadata and lifecycle, no heavy payload."""
 
@@ -184,6 +200,7 @@ class DocumentRead(BaseModel):
     processing_duration_ms: int | None
     created_at: datetime
     updated_at: datetime
+    owner: DocumentOwner
 
 
 class DocumentDetail(DocumentRead):
@@ -227,6 +244,15 @@ class DocumentFilters(BaseModel):
     )
     search: str | None = Field(
         default=None, max_length=255, description="Case-insensitive filename substring."
+    )
+    owner_email: str | None = Field(
+        default=None,
+        max_length=255,
+        description=(
+            "Case-insensitive substring of the uploader's email. Only meaningful "
+            "for an administrator - a regular user's list is already restricted "
+            "to their own documents, so this can never widen it."
+        ),
     )
     sort_by: DocumentSortField = DocumentSortField.CREATED_AT
     sort_dir: SortDirection = SortDirection.DESC

@@ -403,6 +403,60 @@ async def test_admin_can_see_every_document(
     assert listing.json()["meta"]["total"] == 1
 
 
+async def test_list_and_detail_name_the_uploader(
+    client: AsyncClient, api: str, admin_tokens: dict
+) -> None:
+    """An admin's cross-user list is unusable without knowing whose file it is."""
+    user = await login(client, USER_EMAIL, USER_PASSWORD)
+    document = await upload(client, user["access_token"])
+    headers = auth_header(admin_tokens["access_token"])
+
+    listing = await client.get(f"{api}/documents", headers=headers)
+    owner = listing.json()["items"][0]["owner"]
+    assert owner["email"] == USER_EMAIL
+    assert owner["id"] == document["owner"]["id"]
+
+    detail = await client.get(f"{api}/documents/{document['id']}", headers=headers)
+    assert detail.json()["owner"]["email"] == USER_EMAIL
+
+
+async def test_admin_can_filter_the_list_by_uploader(
+    client: AsyncClient, api: str, admin_tokens: dict
+) -> None:
+    user = await login(client, USER_EMAIL, USER_PASSWORD)
+    await upload(client, user["access_token"])
+    await upload(client, admin_tokens["access_token"], data=contract_pdf())
+    headers = auth_header(admin_tokens["access_token"])
+
+    everything = await client.get(f"{api}/documents", headers=headers)
+    assert everything.json()["meta"]["total"] == 2
+
+    filtered = await client.get(
+        f"{api}/documents?owner_email={USER_EMAIL}", headers=headers
+    )
+    body = filtered.json()
+    # The total must reflect the filter too, not just the page - otherwise the
+    # pager offers pages that do not exist.
+    assert body["meta"]["total"] == 1
+    assert body["items"][0]["owner"]["email"] == USER_EMAIL
+
+
+async def test_owner_filter_cannot_widen_a_regular_users_list(
+    client: AsyncClient, api: str, user_tokens: dict
+) -> None:
+    """Passing someone else's email must not reveal their documents."""
+    await register(client, "victim@example.com", "V1ctimPassw0rd")
+    victim = await login(client, "victim@example.com", "V1ctimPassw0rd")
+    await upload(client, victim["access_token"])
+
+    response = await client.get(
+        f"{api}/documents?owner_email=victim@example.com",
+        headers=auth_header(user_tokens["access_token"]),
+    )
+    assert response.status_code == 200
+    assert response.json()["meta"]["total"] == 0
+
+
 async def test_missing_document_is_404(client: AsyncClient, api: str, user_tokens: dict) -> None:
     response = await client.get(
         f"{api}/documents/9999", headers=auth_header(user_tokens["access_token"])

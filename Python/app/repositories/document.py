@@ -14,6 +14,7 @@ from app.models.document import (
     DocumentExtraction,
     DocumentStatus,
 )
+from app.models.user import User
 from app.schemas.document import (
     DocumentFilters,
     DocumentSortField,
@@ -68,16 +69,20 @@ async def get(
     forget: a caller who does not own the row simply gets ``None`` (-> 404),
     which also avoids leaking that the id exists at all.
 
-    ``with_details`` eagerly loads the extraction and event trail. Relationships
-    are declared ``lazy="raise"``, so anything that touches them without this
-    flag fails loudly in tests instead of silently N+1-ing in production.
+    ``with_details`` eagerly loads the owner, the extraction and the event trail.
+    Relationships are declared ``lazy="raise"``, so anything that touches them
+    without this flag fails loudly in tests instead of silently N+1-ing in
+    production - and the detail response includes the owner, so loading it is
+    not optional.
     """
     stmt = select(Document).where(Document.id == document_id)
     if owner_id is not None:
         stmt = stmt.where(Document.owner_id == owner_id)
     if with_details:
         stmt = stmt.options(
-            selectinload(Document.extraction), selectinload(Document.events)
+            selectinload(Document.owner),
+            selectinload(Document.extraction),
+            selectinload(Document.events),
         )
     return await db.scalar(stmt)
 
@@ -102,6 +107,15 @@ def _apply_filters(stmt: Select[Any], filters: DocumentFilters) -> Select[Any]:
         # on backends without a native case-insensitive LIKE.
         needle = f"%{filters.search.strip()}%"
         stmt = stmt.where(Document.filename.ilike(needle))
+    if filters.owner_email:
+        # A correlated EXISTS rather than a join: a join would need de-duplicating
+        # and would change the row count used by the total-count subquery.
+        needle = f"%{filters.owner_email.strip()}%"
+        stmt = stmt.where(
+            select(User.id)
+            .where(User.id == Document.owner_id, User.email.ilike(needle))
+            .exists()
+        )
     return stmt
 
 
@@ -131,7 +145,15 @@ async def list_documents(
     order = column.desc() if filters.sort_dir is SortDirection.DESC else column.asc()
     # Tie-break on the primary key so paging is stable when the sort column has
     # duplicate values (e.g. two uploads in the same second).
-    stmt = base.order_by(order, Document.id.desc()).offset(offset).limit(limit)
+    stmt = (
+        base.order_by(order, Document.id.desc())
+        # The list response names the uploader, which an administrator's
+        # cross-user view is unusable without. One extra query for the page,
+        # rather than one per row.
+        .options(selectinload(Document.owner))
+        .offset(offset)
+        .limit(limit)
+    )
     rows = list((await db.scalars(stmt)).all())
     return rows, total
 

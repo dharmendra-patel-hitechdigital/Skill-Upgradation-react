@@ -108,6 +108,17 @@ def get_document_filters(
         str | None,
         Query(max_length=255, description="Case-insensitive filename substring."),
     ] = None,
+    owner_email: Annotated[
+        str | None,
+        Query(
+            max_length=255,
+            description=(
+                "Case-insensitive substring of the uploader's email. Useful to an "
+                "administrator reviewing one user's uploads; it cannot widen a "
+                "regular user's list, which is already scoped to their own rows."
+            ),
+        ),
+    ] = None,
     sort_by: Annotated[DocumentSortField, Query()] = DocumentSortField.CREATED_AT,
     sort_dir: Annotated[SortDirection, Query()] = SortDirection.DESC,
 ) -> DocumentFilters:
@@ -115,6 +126,7 @@ def get_document_filters(
         status=status,
         document_type=document_type,
         search=search,
+        owner_email=owner_email,
         sort_by=sort_by,
         sort_dir=sort_dir,
     )

@@ -3,6 +3,7 @@ import { useAuth } from '../hooks/useAuth.js'
 import { useApi } from '../hooks/useApi.js'
 import { useDocumentTitle } from '../hooks/useDocumentTitle.js'
 import { fetchStats, fetchRevenue, fetchActivity } from '../api/dashboard.api.js'
+import { displayName } from '../lib/roles.js'
 import Sidebar from '../components/layout/Sidebar.jsx'
 import Topbar from '../components/layout/Topbar.jsx'
 import StatCard from '../components/dashboard/StatCard.jsx'
@@ -41,7 +42,7 @@ export default function Dashboard() {
           <div className="content__header">
             <div>
               <h1 className="content__title">
-                Welcome back, {user?.name?.split(' ')[0] ?? 'there'} 👋
+                Welcome back, {displayName(user).split(' ')[0]} 👋
               </h1>
               <p className="content__subtitle">
                 Here's what's happening with your business today.

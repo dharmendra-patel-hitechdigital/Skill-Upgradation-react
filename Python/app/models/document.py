@@ -77,6 +77,11 @@ class Document(TimestampMixin, Base):
         # Backs the default listing query: owner's documents, newest first,
         # optionally filtered by status.
         Index("ix_documents_owner_status_created", "owner_id", "status", "created_at"),
+        # Backs the *administrator's* listing, which spans every owner and so
+        # cannot use the leading owner_id column of the composite index above.
+        # Without this, the admin document list degrades into a full scan plus a
+        # sort as the table grows.
+        Index("ix_documents_created_at", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

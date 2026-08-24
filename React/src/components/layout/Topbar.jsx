@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useAuth } from '../../hooks/useAuth.js'
+import { displayName, initials, isAdmin } from '../../lib/roles.js'
 
 export default function Topbar({ onMenuClick }) {
   const { user, logout } = useAuth()
@@ -24,14 +25,17 @@ export default function Topbar({ onMenuClick }) {
         </button>
 
         <div className="topbar__user">
+          {/* Derived, not read from a field: the real /users/me returns
+              `full_name`, with no `avatar` or `name` to fall back on. */}
           <button className="topbar__avatar" onClick={() => setMenuOpen((v) => !v)}>
-            {user?.avatar ?? '?'}
+            {user?.avatar ?? initials(user)}
           </button>
           {menuOpen && (
             <div className="topbar__dropdown" onMouseLeave={() => setMenuOpen(false)}>
               <div className="topbar__dropdown-head">
-                <strong>{user?.name}</strong>
+                <strong>{displayName(user)}</strong>
                 <span>{user?.email}</span>
+                {isAdmin(user) && <span className="pill pill--muted">Administrator</span>}
               </div>
               <button className="topbar__dropdown-item" onClick={logout}>
                 Sign out

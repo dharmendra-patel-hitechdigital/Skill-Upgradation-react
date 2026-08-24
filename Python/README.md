@@ -316,7 +316,7 @@ All paths are prefixed with `/api/v1`. Full interactive docs at `/docs`.
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | POST | `/documents` | ✔ | Upload → **202** (or **200** if deduplicated) |
-| GET | `/documents` | ✔ | List, filter, sort, paginate |
+| GET | `/documents` | ✔ | List, filter, sort, paginate (admins see every user's) |
 | GET | `/documents/stats` | ✔ | `{status: count}` for a dashboard |
 | GET | `/documents/{id}` | ✔ | Detail + extraction + audit trail |
 | GET | `/documents/{id}/text` | ✔ | Full extracted text |
@@ -324,6 +324,13 @@ All paths are prefixed with `/api/v1`. Full interactive docs at `/docs`.
 | POST | `/documents/{id}/ask` | ✔ | Grounded natural-language Q&A |
 | POST | `/documents/{id}/reprocess` | ✔ | Re-run the pipeline |
 | DELETE | `/documents/{id}` | ✔ | Delete record, extraction, and blob |
+
+Both the list and the detail response name the uploader in an `owner` object
+(`id`, `email`, `full_name`) — an administrator's cross-user list is unusable
+without it, and a regular user only ever sees their own rows, so it leaks
+nothing. Filter the list with `?owner_email=` (a case-insensitive substring):
+it lets an admin review one person's uploads, and it cannot *widen* a regular
+user's list, which the server has already scoped to them.
 
 ### Dashboard
 
