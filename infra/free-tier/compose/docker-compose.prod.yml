@@ -57,7 +57,11 @@ services:
       options: { max-size: "5m", max-file: "2" }
 
   edge:
-    image: nginx:1.27-alpine
+    # The one image in this bundle that does not come from ECR, so it is the one
+    # that can be rate-limited. A Docker Hub 429 here fails the *deploy* after
+    # the build and tests already passed, on an instance nobody is watching, so
+    # it pulls from the ECR Public mirror by default too.
+    image: ${NGINX_IMAGE:-public.ecr.aws/docker/library/nginx:1.27-alpine}
     restart: unless-stopped
     depends_on: [api, web]
     ports:

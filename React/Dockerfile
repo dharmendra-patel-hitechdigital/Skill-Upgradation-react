@@ -1,7 +1,18 @@
-# syntax=docker/dockerfile:1
+# No `# syntax=` directive on purpose - see the note in Python/Dockerfile: it
+# costs one extra anonymous Docker Hub request per build, and nothing here needs
+# a newer frontend than BuildKit's built-in one.
+
+# --- Base images ---
+# ECR Public mirrors of the Docker Official Images. Docker Hub rate-limits
+# anonymous pulls per source IP and CodeBuild egresses through shared NAT, so
+# pulling `node:20-alpine` directly fails with HTTP 429 unpredictably. Both are
+# overridable: set them back to `node:20-alpine` / `nginx:1.27-alpine` for a
+# plain Docker Hub pull, or to an ECR pull-through cache repository.
+ARG NODE_IMAGE=public.ecr.aws/docker/library/node:20-alpine
+ARG NGINX_IMAGE=public.ecr.aws/docker/library/nginx:1.27-alpine
 
 # --- Build stage ---
-FROM node:20-alpine AS build
+FROM ${NODE_IMAGE} AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
@@ -23,7 +34,7 @@ RUN npm run build
 
 
 # --- Serve stage ---
-FROM nginx:1.27-alpine AS serve
+FROM ${NGINX_IMAGE} AS serve
 
 # Build provenance, stamped by the pipeline. `docker inspect` on a running task
 # then answers "which commit is this?" without a lookup in CodePipeline.

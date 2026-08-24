@@ -1,9 +1,30 @@
-# syntax=docker/dockerfile:1
+# No `# syntax=` directive on purpose. It makes every build resolve
+# docker.io/docker/dockerfile:1 first, which is one more anonymous Docker Hub
+# request per build on top of the base images - and Docker Hub rate-limits by
+# source IP, which in CodeBuild is a shared NAT address. Nothing here needs a
+# newer frontend than the one BuildKit ships with; if that changes, prefer
+# `--build-arg BUILDKIT_SYNTAX=<mirrored ref>` over reintroducing the pull.
+
+# ---------------------------------------------------------------- base image
+# Pulled from the ECR Public mirror of Docker Official Images rather than Docker
+# Hub directly. Docker Hub's anonymous pull limit is enforced per source IP, and
+# CodeBuild egresses through shared NAT addresses, so an unauthenticated
+# `python:3.12-slim` pull fails with HTTP 429 unpredictably - a red pipeline
+# caused by someone else's traffic. ECR Public imposes no such limit on pulls
+# from AWS, and the digests are identical to Docker Hub's.
+#
+# Overridable so nothing is locked to one registry: point this at
+# `python:3.12-slim` for a plain Docker Hub pull, or at an ECR pull-through
+# cache repository if you have one.
+#
+# Declared before the first FROM, which makes it global and therefore usable by
+# both the builder and the runtime stage below.
+ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.12-slim
 
 # ---------------------------------------------------------------- builder
 # Dependencies are built into a wheelhouse in a throwaway stage so compilers and
 # build headers never reach the runtime image.
-FROM python:3.12-slim AS builder
+FROM ${PYTHON_IMAGE} AS builder
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
@@ -20,7 +41,7 @@ RUN pip wheel --wheel-dir /wheels -r requirements.txt
 
 
 # ---------------------------------------------------------------- runtime
-FROM python:3.12-slim AS runtime
+FROM ${PYTHON_IMAGE} AS runtime
 
 # Build provenance, stamped by the pipeline. `docker inspect` on a running task
 # then answers "which commit is this?" without a lookup in CodePipeline.

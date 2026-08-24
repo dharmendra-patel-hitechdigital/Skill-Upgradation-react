@@ -26,12 +26,45 @@
 #                 e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com
 #   PROJECT_NAME  image name prefix (default: skill-upgradation)
 #   VITE_API_BASE_URL  baked into the SPA bundle at build time (default: /api/v1)
+#   PYTHON_IMAGE / NODE_IMAGE / NGINX_IMAGE
+#                 base images, defaulting to the ECR Public mirrors (see below)
 
 set -euo pipefail
 
 PROJECT_NAME="${PROJECT_NAME:-skill-upgradation}"
 VITE_API_BASE_URL="${VITE_API_BASE_URL:-/api/v1}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Base images come from the ECR Public mirror of the Docker Official Images, not
+# from Docker Hub. Docker Hub enforces its anonymous pull limit per source IP,
+# and CodeBuild egresses through shared NAT addresses, so `python:3.12-slim`
+# returns HTTP 429 "Too Many Requests" on a schedule nobody here controls - the
+# build fails on traffic from unrelated AWS customers. ECR Public applies no
+# such limit to pulls from AWS and serves the same digests.
+#
+# Exported because docker-compose.ci.yml interpolates them.
+export PYTHON_IMAGE="${PYTHON_IMAGE:-public.ecr.aws/docker/library/python:3.12-slim}"
+export NODE_IMAGE="${NODE_IMAGE:-public.ecr.aws/docker/library/node:20-alpine}"
+export NGINX_IMAGE="${NGINX_IMAGE:-public.ecr.aws/docker/library/nginx:1.27-alpine}"
+
+# Registry reads stay flaky even without a rate limit (TLS resets, 5xx from a
+# CDN edge, DNS blips). Retrying the whole docker invocation is safe: a build is
+# idempotent, and a partial pull is discarded rather than cached.
+retry() {
+  local attempts=3 delay=5 attempt=1
+  until "$@"; do
+    if [ "$attempt" -ge "$attempts" ]; then
+      # "$*", not "$1 $2": under `set -u` a single-word command would make the
+      # error handler itself die on an unbound $2, hiding the real failure.
+      die "'$*' failed after ${attempts} attempts."
+    fi
+    printf '\033[1;33m..\033[0m attempt %d/%d failed; retrying in %ds\n' \
+      "$attempt" "$attempts" "$delay" >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 3))
+  done
+}
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
@@ -76,18 +109,28 @@ cmd_test() {
   chmod 777 "$REPORT_DIR"
   rm -f "$REPORT_DIR/junit.xml"
 
+  log "Base images: ${PYTHON_IMAGE} | ${NODE_IMAGE} | ${NGINX_IMAGE}"
+
+  # Built as its own step, and retried, so a registry hiccup is reported as
+  # "could not fetch the base image" rather than as a failed test suite. Without
+  # this split, `run` does the pull and a 429 looks identical to a red build.
+  log "Building the test image"
+  retry docker compose -f "${REPO_ROOT}/docker-compose.ci.yml" build tests
+
   log "Running lint + tests in a container"
-  # --rm so a failed run leaves nothing for the next build to trip over.
+  # --rm so a failed run leaves nothing for the next build to trip over. Not
+  # retried: a failing suite must fail once, not three times.
   docker compose -f "${REPO_ROOT}/docker-compose.ci.yml" run --rm tests
   log "Verifying the SPA bundle compiles"
-  docker compose -f "${REPO_ROOT}/docker-compose.ci.yml" build web
+  retry docker compose -f "${REPO_ROOT}/docker-compose.ci.yml" build web
 }
 
 build_api() {
   log "Building API image $1"
-  docker build \
+  retry docker build \
     --file "${REPO_ROOT}/Python/Dockerfile" \
     --target runtime \
+    --build-arg PYTHON_IMAGE="$PYTHON_IMAGE" \
     --build-arg GIT_COMMIT="$1" \
     --build-arg BUILD_TIME="$2" \
     --tag "$(api_image "$1")" \
@@ -97,9 +140,11 @@ build_api() {
 
 build_web() {
   log "Building web image $1 (API base ${VITE_API_BASE_URL})"
-  docker build \
+  retry docker build \
     --file "${REPO_ROOT}/React/Dockerfile" \
     --build-arg VITE_API_BASE_URL="$VITE_API_BASE_URL" \
+    --build-arg NODE_IMAGE="$NODE_IMAGE" \
+    --build-arg NGINX_IMAGE="$NGINX_IMAGE" \
     --build-arg GIT_COMMIT="$1" \
     --build-arg BUILD_TIME="$2" \
     --tag "$(web_image "$1")" \
@@ -129,13 +174,15 @@ cmd_push() {
 
   # The sha tag is what deployments reference; `latest` is a human convenience
   # and is never deployed from.
+  # Retried: a push that dies partway through is resumable, and a transient ECR
+  # 5xx after a green suite is the most wasteful way for a pipeline to fail.
   if wants "$service" api; then
-    docker push "$(api_image "$tag")"
-    docker push "$(api_image latest)"
+    retry docker push "$(api_image "$tag")"
+    retry docker push "$(api_image latest)"
   fi
   if wants "$service" web; then
-    docker push "$(web_image "$tag")"
-    docker push "$(web_image latest)"
+    retry docker push "$(web_image "$tag")"
+    retry docker push "$(web_image latest)"
   fi
   log "Pushed"
   return 0

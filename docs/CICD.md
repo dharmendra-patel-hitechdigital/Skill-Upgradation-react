@@ -61,6 +61,87 @@ Two things this buys:
 The `test` stage is not in the default build — `docker build` without
 `--target` stops at `runtime`, so none of it reaches the deployed image.
 
+## Base images come from ECR Public, not Docker Hub
+
+Every base image resolves through the ECR Public mirror of the Docker Official
+Images:
+
+| Used for | Image |
+|---|---|
+| API builder + runtime | `public.ecr.aws/docker/library/python:3.12-slim` |
+| SPA build stage | `public.ecr.aws/docker/library/node:20-alpine` |
+| SPA serve stage, edge proxy | `public.ecr.aws/docker/library/nginx:1.27-alpine` |
+| Local MySQL | `public.ecr.aws/docker/library/mysql:8.4` |
+
+**Why.** Docker Hub enforces its anonymous pull limit **per source IP**, and
+CodeBuild egresses through shared NAT addresses. So an unauthenticated
+`FROM python:3.12-slim` fails like this, on traffic nobody in this project
+generated:
+
+```
+ERROR: failed to solve: unexpected status from HEAD request to
+https://registry-1.docker.io/v2/library/python/manifests/3.12-slim:
+429 Too Many Requests
+```
+
+That is a red pipeline with a green codebase, and re-running it is a coin flip.
+ECR Public applies no such limit to pulls from AWS and serves the same digests,
+so this is a routing change, not a version change.
+
+Two smaller cuts in the same direction:
+
+* The `# syntax=docker/dockerfile:1` directive is **gone** from both
+  Dockerfiles. It made every build resolve `docker/dockerfile:1` from Docker Hub
+  before reading the file — a second rate-limited request per build, for a
+  frontend whose features this project does not use. If you ever need a newer
+  frontend, pass `--build-arg BUILDKIT_SYNTAX=<mirrored ref>` rather than
+  putting the directive back.
+* The free-tier deploy bundle's `edge` service pulls the mirror too. It was the
+  only image in that bundle not coming from ECR, which made it the only one that
+  could 429 — and it does so at *deploy* time, after tests have passed, on an
+  instance nobody is watching.
+
+**Overriding.** Nothing is pinned to one registry. Each image is a build arg
+with an environment-variable escape hatch, so switching back to Docker Hub (or
+to an [ECR pull-through cache](https://docs.aws.amazon.com/AmazonECR/latest/userguide/pull-through-cache.html),
+which is the better answer at higher volume) is one variable:
+
+```bash
+PYTHON_IMAGE=python:3.12-slim ./scripts/ci.sh test
+NGINX_IMAGE=123456789012.dkr.ecr.us-east-1.amazonaws.com/dockerhub/library/nginx:1.27-alpine \
+  docker compose up
+```
+
+If you must keep pulling from Docker Hub, authenticate the build instead of
+mirroring — `docker login` with a Hub account raises the limit substantially and
+scopes it to the account rather than the NAT address.
+
+Anonymous ECR Public pulls are enough for one build per commit, and need no
+credentials — which is why the buildspecs were left alone. If you later run many
+concurrent builds and start seeing throttling from `public.ecr.aws` too,
+authenticating raises the ceiling:
+
+```bash
+aws ecr-public get-login-password --region us-east-1 \
+  | docker login --username AWS --password-stdin public.ecr.aws
+```
+
+That needs `ecr-public:GetAuthorizationToken` and `sts:GetServiceBearerToken` on
+the CodeBuild role, so it is a pipeline-stack change — not worth making until
+the throttling is real.
+
+### Registry reads are retried
+
+`scripts/ci.sh` wraps every `docker build`/`docker push` in a three-attempt
+retry with exponential backoff, because registry reads fail transiently even
+without a rate limit (TLS resets, CDN 5xx, DNS blips). Builds and pushes are
+idempotent, so retrying is safe.
+
+The **test run itself is deliberately not retried** — a failing suite must fail
+once, not three times. That is also why the test image is now built as its own
+step before `run`: when `run` did the pull, a 429 was indistinguishable in the
+log from a broken test.
+
 ## GitHub Actions
 
 | Workflow | Trigger | Does |

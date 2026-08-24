@@ -20,6 +20,10 @@ services:
       dockerfile: Dockerfile
       # Stops at the `test` stage, which layers pytest/ruff on top of runtime.
       target: test
+      args:
+        # Defaulted in the Dockerfile; threaded through here so one environment
+        # variable switches every build in this file to a different registry.
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-public.ecr.aws/docker/library/python:3.12-slim}
     environment:
       ENVIRONMENT: test
       DATABASE_URL: "sqlite+aiosqlite:///:memory:"
@@ -54,3 +58,5 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_API_BASE_URL: /api/v1
+        NODE_IMAGE: ${NODE_IMAGE:-public.ecr.aws/docker/library/node:20-alpine}
+        NGINX_IMAGE: ${NGINX_IMAGE:-public.ecr.aws/docker/library/nginx:1.27-alpine}

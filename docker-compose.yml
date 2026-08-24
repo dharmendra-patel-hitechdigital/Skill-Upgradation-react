@@ -16,7 +16,11 @@ name: skill-upgradation
 
 services:
   db:
-    image: mysql:8.4
+    # ECR Public mirror by default, for the same reason as the Dockerfiles:
+    # Docker Hub's anonymous pull limit is per source IP, so a shared network
+    # (CI, an office, a VPN) can exhaust it for everyone. Override with
+    # MYSQL_IMAGE=mysql:8.4 to pull from Docker Hub instead.
+    image: ${MYSQL_IMAGE:-public.ecr.aws/docker/library/mysql:8.4}
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: rootpassword
@@ -88,10 +92,12 @@ services:
         # Build-time, not runtime: Vite inlines this into the bundle. Changing
         # it requires `docker compose build web`, not just a restart.
         VITE_API_BASE_URL: /api/v1
+        NODE_IMAGE: ${NODE_IMAGE:-public.ecr.aws/docker/library/node:20-alpine}
+        NGINX_IMAGE: ${NGINX_IMAGE:-public.ecr.aws/docker/library/nginx:1.27-alpine}
     restart: unless-stopped
 
   edge:
-    image: nginx:1.27-alpine
+    image: ${NGINX_IMAGE:-public.ecr.aws/docker/library/nginx:1.27-alpine}
     restart: unless-stopped
     depends_on:
       - api
