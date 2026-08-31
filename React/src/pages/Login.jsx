@@ -64,7 +64,7 @@ export default function Login() {
       <div className="auth__hero">
         <div className="auth__hero-content">
           <span className="auth__logo">HI</span>
-          <h1 className="auth__hero-title">Hitech</h1>
+          <h1 className="auth__hero-title">Hitech Test Demo</h1>
           <p className="auth__hero-text">
             Sign in to your workspace to track revenue, monitor activity, and grow
             with confidence.
